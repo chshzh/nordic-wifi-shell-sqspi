@@ -173,12 +173,8 @@ jobs:
           # gh CLI is not in the NCS toolchain container — use the GitHub REST API directly.
           RELEASE=$(curl -sf -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/latest")
-          ASSET_ID=$(echo "$RELEASE" | python3 -c "
-import sys, json
-assets = json.load(sys.stdin).get('assets', [])
-ids = [a['id'] for a in assets if a['name'] == 'merged.hex']
-print(ids[0] if ids else '')
-")
+          ASSET_ID=$(echo "$RELEASE" | python3 -c \
+            "import sys,json; a=[x['id'] for x in json.load(sys.stdin).get('assets',[]) if x['name']=='merged.hex']; print(a[0] if a else '')")
           if [ -n "$ASSET_ID" ]; then
             curl -sf -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
