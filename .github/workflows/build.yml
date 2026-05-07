@@ -52,14 +52,12 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           west init -l nordic-wifi-shell-sqspi
-          # --group-filter takes one argument per flag; the leading '-' means
-          # "disable this group". Use '--' to stop option parsing before the
-          # filter value so the shell doesn't interpret '-ci-skip' as a flag.
-          # Skip ci-skip (wfa-qt, qcbor, cmock) and benchmark (coremark):
-          # these external repos fail SHA fetches in CI and are not needed.
-          west update -o=--depth=1 \
-            --group-filter -ci-skip \
-            --group-filter -benchmark
+          # Disable groups for optional external repos that fail SHA fetches in CI
+          # and are not needed for the wifi-shell build.
+          # Use west config instead of --group-filter flag: values starting with '-'
+          # are misinterpreted by argparse as new flags even with separate invocations.
+          west config manifest.group-filter -- -ci-skip,-benchmark
+          west update -o=--depth=1
 
       # When restoring from cache the .west config is missing; re-run init (no-op if already there).
       - name: Restore west config after cache hit
