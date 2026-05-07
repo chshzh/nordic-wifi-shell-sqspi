@@ -69,26 +69,40 @@ jobs:
 
       # Apply patches to nrfxlib, nrf, and zephyr on top of their v3.3.0 tags.
       # Skips gracefully if a patch is already applied (cache hit scenario).
+      # Note: git am --check fails on shallow clones because the patch parent
+      # commit is not in the shallow history. Instead, attempt git am directly
+      # and treat "Patch is empty" or "already exists" as success.
       - name: Apply upstream patches
         working-directory: workspace
         run: |
           git config --global --add safe.directory '*'
           PATCHES="$(pwd)/nordic-wifi-shell-sqspi/patches"
 
-          apply_if_needed() {
+          apply_patch() {
             local repo="$1"
             local patch="$2"
-            if git -C "$repo" am --check "$patch" 2>/dev/null; then
-              echo "Applying patch to $repo..."
-              git -C "$repo" am "$patch"
+            echo "Applying patch to $repo..."
+            if git -C "$repo" am "$patch" 2>&1; then
+              echo "✓ Patch applied to $repo"
             else
-              echo "Patch already applied or not applicable for $repo — skipping"
+              # git am sets up MERGE state; abort and check if the commit
+              # with this patch's Subject already exists (already applied).
+              git -C "$repo" am --abort 2>/dev/null || true
+              local subject
+              subject=$(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$patch" | head -1)
+              if git -C "$repo" log --oneline | grep -qF "$subject"; then
+                echo "Patch already applied to $repo — skipping"
+              else
+                echo "ERROR: patch failed for $repo and is not already applied"
+                git -C "$repo" log --oneline -3
+                exit 1
+              fi
             fi
           }
 
-          apply_if_needed nrfxlib "$PATCHES/nrfxlib/"0001-*.patch
-          apply_if_needed nrf     "$PATCHES/nrf/"0001-*.patch
-          apply_if_needed zephyr  "$PATCHES/zephyr/"0001-*.patch
+          apply_patch nrfxlib "$PATCHES/nrfxlib/"0001-*.patch
+          apply_patch nrf     "$PATCHES/nrf/"0001-*.patch
+          apply_patch zephyr  "$PATCHES/zephyr/"0001-*.patch
 
       - name: Build
         working-directory: workspace/nordic-wifi-shell-sqspi
