@@ -1,42 +1,62 @@
 # Nordic Wi-Fi Shell — sQSPI (Zephyr MSPI Driver) Backend
 
 [![Build](https://github.com/chshzh/nordic-wifi-shell-sqspi/actions/workflows/build.yml/badge.svg)](https://github.com/chshzh/nordic-wifi-shell-sqspi/actions/workflows/build.yml)
-[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![NCS](https://img.shields.io/badge/NCS-v3.3.0-skyblue)](https://developer.nordicsemi.com/nRF_Connect_SDK/doc/latest/nrf/index.html)
 
 A port of the NCS Wi-Fi Shell sample to the **nRF54LM20DK + hardware-modified nRF7002 EB-II**, replacing the SPI bus with a **soft QSPI (sQSPI) peripheral** implemented in the FLPR VPR co-processor.
 
 This is a reference implementation demonstrating that the nRF7002 Wi-Fi radio can be driven over Quad SPI from an nRF54LM20DK, unlocking higher bus throughput (tested at 32 MHz) compared to the default single-bit SPI.
 
-- **Evaluator** — grab the pre-built `merged.hex` from the [Releases](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases) page and follow the [Quick Start](#evaluator-quick-start) below. No build environment needed.
+- **Evaluator** — grab the pre-built firmware from the [Releases](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases) page and follow the [Quick Start](#evaluator-quick-start) below. No build environment needed.
 - **Developer** — clone, apply patches, build from source; see [Developer Info](#developer-info).
 
 ---
 
 ## Evaluator Quick Start
 
-> Pre-built path — no build environment needed. ~5 minutes.
-> **Requires the hardware modification** (cut SB1–4, solder SB5–8). See [Hardware Modification](#hardware-modification-spi--sqspi).
+> Evaluator path — no build environment needed. Requires one hardware modification. ~15 minutes total.
+
+### Step 1 — Hardware modification: SPI → sQSPI
+
+The nRF7002 EB-II has solder bridges that route the nRF7002 QSPI data lines either to the SPI path (SB1–SB4, closed by default) or to the QSPI path (SB5–SB8, open by default). The modification cuts SB1–SB4 and closes SB5–SB8.
+
+**Solder bridge modification:**
+
+| Bridge | Before | After | Signal |
+|--------|--------|-------|--------|
+| SB1    | closed | **cut**    | SPI MOSI / DQ0 (old single-wire path) |
+| SB2    | closed | **cut**    | SPI MISO / DQ1 (old single-wire path) |
+| SB3    | closed | **cut**    | SPI SCK |
+| SB4    | closed | **cut**    | SPI CS / BUCKEN path |
+| SB5    | open   | **solder** | QSPI DQ0 → expansion header pin 18 (P2.2) |
+| SB6    | open   | **solder** | QSPI DQ1 → expansion header pin 20 (P2.4) |
+| SB7    | open   | **solder** | QSPI DQ2 → expansion header pin 19 (P2.3) |
+| SB8    | open   | **solder** | QSPI CS0 → expansion header pin 21 (P2.5) |
+
+Reference: [nRF7002 EB-II QSPI strap guide](https://docs.nordicsemi.com/bundle/ug_nrf7002_eb2/page/UG/nrf7002_EK/hw_wifi_strap_qspi.html)
+
+**After soldering — configure the nRF54LM20DK with Board Configurator:**
+
+Open **nRF Connect for Desktop → Board Configurator**, select your nRF54LM20DK, and verify:
+
+1. **External Memory (QSPI)** — set to **Disabled**. The Port 2 SDP pins (P2.0–P2.5) used by sQSPI are shared with the on-board external flash in the default DK configuration. Disabling external memory frees these pins for the sQSPI peripheral.
+
+2. **VDD_IO** — set to **3.3 V** (default is 1.8 V). At 32 MHz, the SPI signals must transition within a ~15.6 ns half-clock period. The 3.3 V swing provides the drive current needed to charge and discharge the connector parasitic capacitance in time; 1.8 V is insufficient at this speed.
+
+> These settings are stored in the DK's onboard configuration and persist across reboots.
 
 ### Step 2 — Flash the firmware
 
-Download `merged.hex` from the [Latest Release](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases/latest), then open **nRF Connect for Desktop → Programmer**, select your nRF54LM20DK, add the `.hex` file, and click **Erase & Write**.
+Download `nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex` from the [Latest Release](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases/latest), then open **nRF Connect for Desktop → Programmer**, select your nRF54LM20DK, add the `.hex` file, and click **Erase & Write**.
 
 Or flash via command line (requires a local NCS toolchain):
 
 ```sh
-west flash -d nordic-wifi-shell-sqspi/build --recover 
+west flash -d nordic-wifi-shell-sqspi/build --recover
 ```
 
 ### Step 3 — Connect to the console
 
-Open a serial terminal on **VCOM0** (the first COM port enumerated by the DK) at **115200 baud** with **hardware flow control enabled** (RTS/CTS).
-
-> **NOTE** The firmware redirects the Zephyr shell from UART20 to UART30. UART30 maps to VCOM0 on the nRF54LM20DK (Port 0, P0.6/P0.7). This is consistent with the standard unmodified `nrf7002eb2` shield behaviour, which due to potentioal conflict when using with nRF54L15DK. For nRF54LM20DK+nRF7002EB-II combination, UART20 default pins (P1.16–P1.19) are **not** used by the nRF7002 EB-II expansion header nexus — the redirect to UART30 is inherited from the upstream `nrf7002eb2` shield for nRF54LM20.
-
-Recommended tools:
-- **nRF Connect for Desktop → Serial Terminal** — select VCOM0, 115200 baud, flow control ON
-- `python3 nordicsemi_uart_monitor.py --port /dev/cu.usbmodem... --baud 115200`
+Open a serial terminal on **VCOM1** at **115200 baud**. On the nRF54LM20DK, the application console (UART20, P1.16/P1.17) is enumerated as **VCOM1** — the second COM port. VCOM0 is the debug UART (UART30, P0.6/P0.7).
 
 You should see the Zephyr boot log followed by the shell prompt `uart:~$`.
 
@@ -85,7 +105,7 @@ This project is a [Workspace Application](https://docs.nordicsemi.com/bundle/ncs
   import: true
 ```
 
-#### Method 1 (Preferred) — Add to an existing NCS v3.3.0 installation
+#### Add to an existing NCS v3.3.0 installation
 
 ```sh
 cd /opt/nordic/ncs/v3.3.0   # your existing NCS workspace root
@@ -93,14 +113,6 @@ cd /opt/nordic/ncs/v3.3.0   # your existing NCS workspace root
 git clone https://github.com/chshzh/nordic-wifi-shell-sqspi.git
 
 west config manifest.path nordic-wifi-shell-sqspi
-west update
-```
-
-#### Method 2 — Fresh workspace via CLI
-
-```sh
-west init -m https://github.com/chshzh/nordic-wifi-shell-sqspi --mr main ncs-sqspi
-cd ncs-sqspi
 west update
 ```
 
@@ -140,11 +152,11 @@ west flash -d nordic-wifi-shell-sqspi/build --recover --dev-id <SERIAL>
 
 ### Serial Monitor
 
-Connect to VCOM0 at **115200 baud, hardware flow control ON**:
+Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the second COM port enumerated by the nRF54LM20DK.
 
 ### Developer Notes
 
-- **UART30 only**: UART30 (VCOM0, P0.6/P0.7) is used as the console. UART20 is disabled, inherited from the upstream `nrf7002eb2` shield for nRF54LM20. (UART20 default pins P1.16–P1.19 are not part of the expansion header nexus; the redirect is upstream shield behaviour.)
+- **UART20 / VCOM1**: The default Zephyr console (UART20, P1.16/P1.17) is used — no redirect needed. On the nRF54LM20DK, UART20 is enumerated as VCOM1. UART20 pins P1.16–P1.19 are not used by the nRF7002 EB-II expansion header nexus (which maps gpio1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.13 only), so there is no pin conflict.
 - **BUTTON3 unavailable**: The standard `nrf7002eb2` shield removes BUTTON3 (hardware pin conflict on nRF54LM20DK). The sQSPI shield inherits this.
 - **Random MAC**: `CONFIG_WIFI_RANDOM_MAC_ADDRESS=y` is enabled to work around boards with blank OTP MAC (`FF:FF:FF:FF:FF:FF`).
 - **Memory layout**: Top 16 KB of app-core SRAM (`0x2007c000–0x2007ffff`) is reserved for the sQSPI soft peripheral firmware and register file.

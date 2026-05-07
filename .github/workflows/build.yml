@@ -132,6 +132,7 @@ jobs:
 
       # On every push to main: update the rolling "latest" release with fresh firmware.
       # softprops/action-gh-release creates the tag+release if absent, updates it if present.
+      # Remove stale merged.hex asset first (may exist from earlier releases).
       - name: Update rolling latest release
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -150,7 +151,13 @@ jobs:
             ---
 
             For flashing and setup instructions, see the **[Evaluator Quick Start](https://github.com/chshzh/nordic-wifi-shell-sqspi#evaluator-quick-start)** in the README.
-
-            > Requires one hardware modification (solder bridges SB1–SB8) and Board Configurator setup (External Memory disabled, VDD_IO = 3.3 V).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove stale merged.hex from release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release delete-asset latest merged.hex --yes 2>/dev/null || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
