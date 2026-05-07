@@ -173,18 +173,25 @@ jobs:
 
       - name: Remove stale merged.hex from release
         if: github.ref == 'refs/heads/main'
+        # curl is not available in the NCS toolchain container — use python3 urllib instead.
         run: |
-          # gh CLI is not in the NCS toolchain container — use the GitHub REST API directly.
-          RELEASE=$(curl -sf -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/latest")
-          ASSET_ID=$(echo "$RELEASE" | python3 -c \
-            "import sys,json; a=[x['id'] for x in json.load(sys.stdin).get('assets',[]) if x['name']=='merged.hex']; print(a[0] if a else '')")
-          if [ -n "$ASSET_ID" ]; then
-            curl -sf -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
-            echo "Deleted stale merged.hex (asset id $ASSET_ID)"
-          else
-            echo "merged.hex not present in release — nothing to delete"
-          fi
+          python3 -c "
+          import os, json, urllib.request as ul
+          tok = os.environ['GITHUB_TOKEN']
+          repo = os.environ['GITHUB_REPOSITORY']
+          req = ul.Request(
+              'https://api.github.com/repos/' + repo + '/releases/tags/latest',
+              headers={'Authorization': 'token ' + tok, 'Accept': 'application/vnd.github+json'})
+          rel = json.loads(ul.urlopen(req).read())
+          stale = [a for a in rel.get('assets', []) if a['name'] == 'merged.hex']
+          if stale:
+              ul.urlopen(ul.Request(
+                  'https://api.github.com/repos/' + repo + '/releases/assets/' + str(stale[0]['id']),
+                  method='DELETE',
+                  headers={'Authorization': 'token ' + tok, 'Accept': 'application/vnd.github+json'}))
+              print('Deleted stale merged.hex (id=' + str(stale[0]['id']) + ')')
+          else:
+              print('merged.hex not in release assets — nothing to delete')
+          "
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
