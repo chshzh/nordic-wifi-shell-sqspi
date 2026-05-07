@@ -6,7 +6,7 @@ A port of the NCS Wi-Fi Shell sample to the **nRF54LM20DK + hardware-modified nR
 
 This is a reference implementation demonstrating that the nRF7002 Wi-Fi radio can be driven over Quad SPI from an nRF54LM20DK, unlocking higher bus throughput (tested at 32 MHz) compared to the default single-bit SPI.
 
-- **Evaluator** — grab the pre-built firmware from the [Releases](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases) page and follow the [Quick Start](#evaluator-quick-start) below. No build environment needed.
+- **Evaluator** — grab the pre-built firmware from the [Releases](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases) page and follow the [Evaluator Quick Start](#evaluator-quick-start) below. No build environment needed.
 - **Developer** — clone, apply patches, build from source; see [Developer Info](#developer-info).
 
 ---
@@ -48,17 +48,11 @@ Open **nRF Connect for Desktop → Board Configurator**, select your nRF54LM20DK
 
 Download `nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex` from the [Latest Release](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases/latest), then open **nRF Connect for Desktop → Programmer**, select your nRF54LM20DK, add the `.hex` file, and click **Erase & Write**.
 
-Or flash via command line (requires a local NCS toolchain):
-
-```sh
-west flash -d nordic-wifi-shell-sqspi/build --recover
-```
-
 ### Step 3 — Connect to the console
 
-Open a serial terminal on **VCOM1** at **115200 baud**. On the nRF54LM20DK, the application console (UART20, P1.16/P1.17) is enumerated as **VCOM1** — the second COM port. VCOM0 is the debug UART (UART30, P0.6/P0.7).
+Open a serial terminal on **VCOM1** at **115200 baud**. On the nRF54LM20DK, the application console (UART20, P1.16/P1.17) is enumerated as **VCOM1** — the second COM port.
 
-You should see the Zephyr boot log followed by the shell prompt `uart:~$`.
+You should see the Zephyr and NCS boot log followed by the shell prompt `uart:~$`.
 
 ### Step 4 — Connect to Wi-Fi
 
@@ -94,16 +88,6 @@ nordic-wifi-shell-sqspi/
 
 
 ### Workspace Setup
-
-
-This project is a [Workspace Application](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/dev_model_and_contributions/adding_code.html#workflow_4_workspace_application_repository_recommended). The [west.yml](west.yml) manifest pins to NCS v3.3.0:
-
-```yaml
-- name: nrf
-  url: https://github.com/nrfconnect/sdk-nrf
-  revision: v3.3.0
-  import: true
-```
 
 #### Add to an existing NCS v3.3.0 installation
 
@@ -187,6 +171,5 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 
 ## License
 
-`nordic-wifi-shell-sqspi/` application code is licensed under **Apache-2.0**.
-Modified upstream files in `nrfxlib/` retain **LicenseRef-Nordic-5-Clause**.
+`nordic-wifi-shell-sqspi/` application code is licensed under **LicenseRef-Nordic-5-Clause**.
 Modified upstream files in `zephyr/` and `nrf/` retain their original licenses.

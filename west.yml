@@ -18,34 +18,6 @@ manifest:
       revision: v3.3.0
       import: true
 
-    - name: wfa-qt-control-app
-      url: https://github.com/nrfconnect/sdk-wi-fiquicktrack-controlappc
-      revision: 63b3fa8bab483d021dd8c09a581887b039aa9e8a
-      path: modules/lib/wfa-qt-control-app
-      groups:
-        - ci-skip
-
-    - name: qcbor
-      url: https://github.com/laurencelundblade/QCBOR
-      revision: 751d36583a9ce1a640900c57e13c9b6b8f3a2ba2
-      path: modules/tee/tf-m/qcbor
-      groups:
-        - ci-skip
-
-    - name: cmock
-      url: https://github.com/ThrowTheSwitch/cmock
-      revision: f65066f15d8248e6dcb778efb8739904a4512087
-      path: test/cmock
-      groups:
-        - ci-skip
-
-    - name: coremark
-      url: https://github.com/eembc/coremark
-      revision: d5fad6bd094899101a4e5fd53af7298160ced6ab
-      path: modules/benchmark/coremark
-      groups:
-        - ci-skip
-
   # Tell west that this app lives at nordic-wifi-shell-sqspi/ in the workspace.
   self:
     path: nordic-wifi-shell-sqspi
