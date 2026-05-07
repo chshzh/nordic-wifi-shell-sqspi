@@ -86,13 +86,13 @@ jobs:
           apply_if_needed zephyr  "$PATCHES/zephyr/"0001-*.patch
 
       - name: Build
-        working-directory: workspace
+        working-directory: workspace/nordic-wifi-shell-sqspi
         run: |
           west build \
             -b nrf54lm20dk/nrf54lm20a/cpuapp \
             -p \
-            -d nordic-wifi-shell-sqspi/build \
-            nordic-wifi-shell-sqspi \
+            -d build \
+            . \
             -- -DSHIELD=nrf7002eb2_mspi
 
       - name: Collect artifacts
@@ -101,6 +101,9 @@ jobs:
           HEX="workspace/nordic-wifi-shell-sqspi/build/merged.hex"
           if [ ! -f "$HEX" ]; then
             HEX="workspace/nordic-wifi-shell-sqspi/build/nordic-wifi-shell-sqspi/zephyr/zephyr.hex"
+          fi
+          if [ ! -f "$HEX" ]; then
+            HEX="workspace/nordic-wifi-shell-sqspi/build/zephyr/zephyr.hex"
           fi
           cp "$HEX" artifacts/merged.hex
 

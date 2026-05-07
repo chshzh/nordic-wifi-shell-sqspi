@@ -3,11 +3,25 @@ manifest:
 
   # Use sdk-nrf as the manifest source; import pulls in all NCS dependencies
   # (zephyr, nrfxlib, modules, bootloader, etc.).
+  #
+  # zephyr and nrfxlib are listed explicitly here so that 'west update --narrow'
+  # clones them — they are needed for our custom patches. Without explicit listing,
+  # --narrow only clones 'nrf' and skips the transitive imports.
   projects:
     - name: nrf
       url: https://github.com/nrfconnect/sdk-nrf
       revision: v3.3.0
       import: true
+
+    - name: zephyr
+      url: https://github.com/nrfconnect/sdk-zephyr
+      revision: ncs-v3.3.0
+      path: zephyr
+
+    - name: nrfxlib
+      url: https://github.com/nrfconnect/sdk-nrfxlib
+      revision: v3.3.0
+      path: nrfxlib
 
   # Tell west that this app lives at nordic-wifi-shell-sqspi/ in the workspace.
   self:
