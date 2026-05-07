@@ -46,7 +46,23 @@ Open **nRF Connect for Desktop → Board Configurator**, select your nRF54LM20DK
 
 ### Step 2 — Flash the firmware
 
-Download `nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex` from the [Latest Release](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases/latest), then open **nRF Connect for Desktop → Programmer**, select your nRF54LM20DK, add the `.hex` file, and click **Erase & Write**.
+Download `nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex` from the [Latest Release](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases/latest).
+
+**Option A — GUI (nRF Connect for Desktop):** *(recommended)*
+
+Open **nRF Connect for Desktop → Programmer**, select your nRF54LM20DK, add the `.hex` file, and click **Erase & Write**.
+
+**Option B — CLI (nrfutil):**
+
+```sh
+# Recover the device first (required on first flash or after mass erase)
+nrfutil device recover
+
+# Program the hex file
+nrfutil device program \
+  --firmware nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex \
+  --options chip_erase_mode=ERASE_ALL
+```
 
 ### Step 3 — Connect to the console
 
@@ -87,7 +103,9 @@ nordic-wifi-shell-sqspi/
 ```
 
 
-### Workspace Setup
+### Development Env Setup
+
+> Make sure [Hardware modification](#step-1--hardware-modification-spi--sqspi) has been done.
 
 #### Add to an existing NCS v3.3.0 installation
 
@@ -131,7 +149,7 @@ nrfutil sdk-manager toolchain launch --ncs-version=v3.3.0 -- \
 
 ```sh
 # nRF54LM20DK requires --recover for first flash or after mass erase
-west flash -d nordic-wifi-shell-sqspi/build --recover --dev-id <SERIAL>
+west flash -d nordic-wifi-shell-sqspi/build --recover
 ```
 
 ### Serial Monitor
@@ -172,4 +190,4 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 ## License
 
 `nordic-wifi-shell-sqspi/` application code is licensed under **LicenseRef-Nordic-5-Clause**.
-Modified upstream files in `zephyr/` and `nrf/` retain their original licenses.
+Modified upstream files in `/nrfxlib`,`nrf/` and `zephyr/` retain their original licenses.
