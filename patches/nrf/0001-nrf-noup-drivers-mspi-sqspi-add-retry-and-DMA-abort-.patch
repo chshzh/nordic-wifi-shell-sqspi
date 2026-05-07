@@ -1,0 +1,402 @@
+From 24862d33a177c0968c736b3c8160f4011dda5eae Mon Sep 17 00:00:00 2001
+From: Charlie Shao <charlie.shao@nordicsemi.no>
+Date: Thu, 7 May 2026 09:37:01 +0200
+Subject: [PATCH] [nrf noup] drivers: mspi: sqspi: add retry and DMA abort
+ recovery
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+After a barrier or DMA timeout, the sQSPI soft peripheral can be left
+in an inconsistent state. Without recovery, all subsequent transfers
+will fail, cascading to WiFi init/connection failure.
+
+Add retry logic (up to 2 attempts) in perform_xfer():
+- On nrf_sqspi_xfer() barrier timeout: call nrf_sqspi_abort(), deassert
+  CE, then retry.
+- On k_sem_take() DMA timeout: same recovery path.
+- Between retries: k_busy_wait(200) to allow VPR post-transfer cleanup.
+- CE is deasserted before every abort so the nRF7002 does not see
+  a partial transaction.
+
+Remove the 200us busy-wait that was applied unconditionally before every
+transfer attempt; the wait is now only between retry attempts, so the
+common (non-retry) path has no added latency.
+
+Tested on nRF54LM20DK + nRF7002 EB-II (sQSPI mod) at 32 MHz:
+20/20 consecutive boot→WiFi-connect cycles pass.
+
+Assisted-by: Claude:claude-sonnet-4.6
+Signed-off-by: chsh <chsh@users.noreply.github.com>
+Signed-off-by: Charlie Shao <charlie.shao@nordicsemi.no>
+---
+ drivers/mspi/mspi_sqspi.c | 188 ++++++++++++++++++--------------------
+ 1 file changed, 90 insertions(+), 98 deletions(-)
+
+diff --git a/drivers/mspi/mspi_sqspi.c b/drivers/mspi/mspi_sqspi.c
+index c93313d1c6..47c9ad26d2 100644
+--- a/drivers/mspi/mspi_sqspi.c
++++ b/drivers/mspi/mspi_sqspi.c
+@@ -46,8 +46,7 @@ struct mspi_sqspi_config {
+ 	void *mem_reg;
+ };
+ 
+-static void done_callback(const nrf_sqspi_t *sqspi, nrf_sqspi_evt_t *event,
+-			  void *context)
++static void done_callback(const nrf_sqspi_t *sqspi, nrf_sqspi_evt_t *event, void *context)
+ {
+ 	ARG_UNUSED(sqspi);
+ 	struct mspi_sqspi_data *dev_data = context;
+@@ -66,8 +65,7 @@ static int api_config(const struct mspi_dt_spec *spec)
+ 	return -ENOTSUP;
+ }
+ 
+-static int _api_dev_config(const struct device *dev,
+-			   const enum mspi_dev_cfg_mask param_mask,
++static int _api_dev_config(const struct device *dev, const enum mspi_dev_cfg_mask param_mask,
+ 			   const struct mspi_dev_cfg *cfg)
+ {
+ 	struct mspi_sqspi_data *dev_data = dev->data;
+@@ -155,10 +153,9 @@ static int _api_dev_config(const struct device *dev,
+ 	}
+ 
+ 	if (param_mask & MSPI_DEVICE_CONFIG_FREQUENCY) {
+-		if (cfg->freq < 1 ||
+-		    cfg->freq > SP_VPR_BASE_FREQ_HZ) {
+-			LOG_ERR("Invalid frequency: %u, MIN: %u, MAX: %u",
+-				cfg->freq, 1, SP_VPR_BASE_FREQ_HZ);
++		if (cfg->freq < 1 || cfg->freq > SP_VPR_BASE_FREQ_HZ) {
++			LOG_ERR("Invalid frequency: %u, MIN: %u, MAX: %u", cfg->freq, 1,
++				SP_VPR_BASE_FREQ_HZ);
+ 			return -EINVAL;
+ 		}
+ 
+@@ -184,10 +181,8 @@ static int _api_dev_config(const struct device *dev,
+ 	return 0;
+ }
+ 
+-static int api_dev_config(const struct device *dev,
+-			  const struct mspi_dev_id *dev_id,
+-			  const enum mspi_dev_cfg_mask param_mask,
+-			  const struct mspi_dev_cfg *cfg)
++static int api_dev_config(const struct device *dev, const struct mspi_dev_id *dev_id,
++			  const enum mspi_dev_cfg_mask param_mask, const struct mspi_dev_cfg *cfg)
+ {
+ 	struct mspi_sqspi_data *dev_data = dev->data;
+ 	int rc;
+@@ -237,14 +232,18 @@ static int api_get_channel_status(const struct device *dev, uint8_t ch)
+ 	return 0;
+ }
+ 
+-static int perform_xfer(const struct device *dev,
+-			const nrf_sqspi_xfer_t *sqspi_xfer,
++static int perform_xfer(const struct device *dev, const nrf_sqspi_xfer_t *sqspi_xfer,
+ 			k_timeout_t timeout)
+ {
+ 	const struct mspi_sqspi_config *dev_config = dev->config;
+ 	struct mspi_sqspi_data *dev_data = dev->data;
+ 	int rc = 0;
+ 	nrfx_err_t err;
++	int retries = 2;
++
++retry:
++	/* Allow VPR to finish post-transfer processing from previous xfer */
++	k_busy_wait(200);
+ 
+ 	if (dev_data->dev_id->ce.port) {
+ 		rc = gpio_pin_set_dt(&dev_data->dev_id->ce, 1);
+@@ -256,13 +255,33 @@ static int perform_xfer(const struct device *dev,
+ 
+ 	err = nrf_sqspi_xfer(&dev_config->sqspi, sqspi_xfer, 1, 0);
+ 	if (err != NRFX_SUCCESS) {
++		/* Deassert CE */
++		if (dev_data->dev_id->ce.port) {
++			gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
++		}
++		if (retries > 0) {
++			nrf_sqspi_abort(&dev_config->sqspi);
++			retries--;
++			goto retry;
++		}
+ 		LOG_ERR("nrf_sqspi_xfer() failed: %08x", err);
+ 		return -EIO;
+ 	}
+ 
+ 	rc = k_sem_take(&dev_data->finished, timeout);
+ 	if (rc < 0) {
+-		rc = -ETIMEDOUT;
++		/* Deassert CE */
++		if (dev_data->dev_id->ce.port) {
++			gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
++		}
++		nrf_sqspi_abort(&dev_config->sqspi);
++		if (retries > 0) {
++			retries--;
++			goto retry;
++		}
++		LOG_ERR("xfer timeout: cmd=0x%x len=%u", sqspi_xfer->cmd,
++			(uint32_t)sqspi_xfer->data_length);
++		return -ETIMEDOUT;
+ 	}
+ 
+ 	if (dev_data->dev_id->ce.port) {
+@@ -279,20 +298,15 @@ static int perform_xfer(const struct device *dev,
+ 	return rc;
+ }
+ 
+-static int process_packet(const struct device *dev,
+-			  const struct mspi_xfer_packet *packet,
+-			  const struct mspi_xfer *xfer,
+-			  k_timeout_t timeout)
++static int process_packet(const struct device *dev, const struct mspi_xfer_packet *packet,
++			  const struct mspi_xfer *xfer, k_timeout_t timeout)
+ {
+ 	const struct mspi_sqspi_config *dev_config = dev->config;
+ 	nrf_sqspi_xfer_t sqspi_xfer = {
+ 		/* Use TX direction when there is no data to transfer. */
+-		.dir = NRF_SQSPI_XFER_DIR_TX,
+-		.cmd = packet->cmd,
+-		.address = packet->address,
+-		.data_length = packet->num_bytes,
+-		.cmd_length = 8 * xfer->cmd_length,
+-		.addr_length = 8 * xfer->addr_length,
++		.dir = NRF_SQSPI_XFER_DIR_TX,       .cmd = packet->cmd,
++		.address = packet->address,         .data_length = packet->num_bytes,
++		.cmd_length = 8 * xfer->cmd_length, .addr_length = 8 * xfer->addr_length,
+ 	};
+ 	int rc;
+ 
+@@ -300,24 +314,19 @@ static int process_packet(const struct device *dev,
+ 		if (packet->dir == MSPI_TX) {
+ 			sqspi_xfer.dir = NRF_SQSPI_XFER_DIR_TX;
+ 			sqspi_xfer.dummy_length = xfer->tx_dummy;
+-			rc = dmm_buffer_out_prepare(dev_config->mem_reg,
+-						    packet->data_buf,
+-						    packet->num_bytes,
+-						    &sqspi_xfer.p_data);
++			rc = dmm_buffer_out_prepare(dev_config->mem_reg, packet->data_buf,
++						    packet->num_bytes, &sqspi_xfer.p_data);
+ 		} else {
+ 			sqspi_xfer.dir = NRF_SQSPI_XFER_DIR_RX;
+ 			sqspi_xfer.dummy_length = xfer->rx_dummy;
+-			rc = dmm_buffer_in_prepare(dev_config->mem_reg,
+-						   packet->data_buf,
+-						   packet->num_bytes,
+-						   &sqspi_xfer.p_data);
++			rc = dmm_buffer_in_prepare(dev_config->mem_reg, packet->data_buf,
++						   packet->num_bytes, &sqspi_xfer.p_data);
+ 		}
+ 		if (rc < 0) {
+ 			LOG_ERR("Failed to allocate DMM buffer (%d)", rc);
+ 			return rc;
+ 		}
+-	} else if (xfer->cmd_length == 0 &&
+-		   xfer->addr_length == 0) {
++	} else if (xfer->cmd_length == 0 && xfer->addr_length == 0) {
+ 		/* Nothing to be transferred, skip this packet. */
+ 		return 0;
+ 	}
+@@ -331,21 +340,17 @@ static int process_packet(const struct device *dev,
+ 		 * and that call has succeeded, we know the region is valid.
+ 		 */
+ 		if (packet->dir == MSPI_TX) {
+-			(void)dmm_buffer_out_release(dev_config->mem_reg,
+-						     sqspi_xfer.p_data);
++			(void)dmm_buffer_out_release(dev_config->mem_reg, sqspi_xfer.p_data);
+ 		} else {
+-			(void)dmm_buffer_in_release(dev_config->mem_reg,
+-						    packet->data_buf,
+-						    packet->num_bytes,
+-						    sqspi_xfer.p_data);
++			(void)dmm_buffer_in_release(dev_config->mem_reg, packet->data_buf,
++						    packet->num_bytes, sqspi_xfer.p_data);
+ 		}
+ 	}
+ 
+ 	return rc;
+ }
+ 
+-static int _api_transceive(const struct device *dev,
+-			   const struct mspi_xfer *req)
++static int _api_transceive(const struct device *dev, const struct mspi_xfer *req)
+ {
+ 	const struct mspi_sqspi_config *dev_config = dev->config;
+ 	struct mspi_sqspi_data *dev_data = dev->data;
+@@ -354,8 +359,8 @@ static int _api_transceive(const struct device *dev,
+ 	nrfx_err_t err;
+ 	int rc;
+ 
+-	err = nrf_sqspi_dev_cfg(&dev_config->sqspi, &dev_data->sqspi_dev_cfg,
+-				done_callback, dev_data);
++	err = nrf_sqspi_dev_cfg(&dev_config->sqspi, &dev_data->sqspi_dev_cfg, done_callback,
++				dev_data);
+ 	if (err != NRFX_SUCCESS) {
+ 		LOG_ERR("nrf_sqspi_dev_cfg() failed: %08x", err);
+ 		return -EIO;
+@@ -371,8 +376,7 @@ static int _api_transceive(const struct device *dev,
+ 	return 0;
+ }
+ 
+-static int api_transceive(const struct device *dev,
+-			  const struct mspi_dev_id *dev_id,
++static int api_transceive(const struct device *dev, const struct mspi_dev_id *dev_id,
+ 			  const struct mspi_xfer *req)
+ {
+ 	struct mspi_sqspi_data *dev_data = dev->data;
+@@ -414,16 +418,14 @@ static int api_transceive(const struct device *dev,
+ 	return rc;
+ }
+ 
+-static int dev_pm_action_cb(const struct device *dev,
+-			    enum pm_device_action action)
++static int dev_pm_action_cb(const struct device *dev, enum pm_device_action action)
+ {
+ 	struct mspi_sqspi_data *dev_data = dev->data;
+ 	const struct mspi_sqspi_config *dev_config = dev->config;
+ 	int rc;
+ 
+ 	if (action == PM_DEVICE_ACTION_RESUME) {
+-		rc = pinctrl_apply_state(dev_config->pcfg,
+-					 PINCTRL_STATE_DEFAULT);
++		rc = pinctrl_apply_state(dev_config->pcfg, PINCTRL_STATE_DEFAULT);
+ 		if (rc < 0) {
+ 			LOG_ERR("Cannot apply default pins state (%d)", rc);
+ 			return rc;
+@@ -431,8 +433,8 @@ static int dev_pm_action_cb(const struct device *dev,
+ 
+ 		nrf_sqspi_activate(&dev_config->sqspi);
+ #if defined(CONFIG_SOC_SERIES_NRF54L)
+-		nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF,
+-			1, MEMCONF_POWER_RET_MEM0_Pos, false);
++		nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, 1, MEMCONF_POWER_RET_MEM0_Pos,
++						    false);
+ #endif
+ 
+ 		dev_data->suspended = false;
+@@ -440,10 +442,8 @@ static int dev_pm_action_cb(const struct device *dev,
+ 		return 0;
+ 	}
+ 
+-	if (IS_ENABLED(CONFIG_PM_DEVICE) &&
+-	    action == PM_DEVICE_ACTION_SUSPEND) {
+-		rc = pinctrl_apply_state(dev_config->pcfg,
+-					 PINCTRL_STATE_SLEEP);
++	if (IS_ENABLED(CONFIG_PM_DEVICE) && action == PM_DEVICE_ACTION_SUSPEND) {
++		rc = pinctrl_apply_state(dev_config->pcfg, PINCTRL_STATE_SLEEP);
+ 		if (rc < 0) {
+ 			LOG_ERR("Cannot apply sleep pins state (%d)", rc);
+ 			return rc;
+@@ -455,8 +455,8 @@ static int dev_pm_action_cb(const struct device *dev,
+ 		}
+ 
+ #if defined(CONFIG_SOC_SERIES_NRF54L)
+-		nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF,
+-			1, MEMCONF_POWER_RET_MEM0_Pos, true);
++		nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, 1, MEMCONF_POWER_RET_MEM0_Pos,
++						    true);
+ #endif
+ 		nrf_sqspi_deactivate(&dev_config->sqspi);
+ 
+@@ -498,17 +498,15 @@ static int dev_init(const struct device *dev)
+ 	dev_data->sqspi_dev_cfg.sample_delay_cyc = 1;
+ 
+ #if defined(CONFIG_SOC_SERIES_NRF54L)
+-	nrf_oscillators_pll_freq_set(NRF_OSCILLATORS,
+-				     NRF_OSCILLATORS_PLL_FREQ_128M);
++	nrf_oscillators_pll_freq_set(NRF_OSCILLATORS, NRF_OSCILLATORS_PLL_FREQ_128M);
+ #if !defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+-	nrf_spu_periph_perm_secattr_set(NRF_SPU00,
+-		nrf_address_slave_get(DT_REG_ADDR(DT_NODELABEL(cpuflpr_vpr))),
+-		true);
++	nrf_spu_periph_perm_secattr_set(
++		NRF_SPU00, nrf_address_slave_get(DT_REG_ADDR(DT_NODELABEL(cpuflpr_vpr))), true);
+ #endif
+ #endif /* defined(CONFIG_SOC_SERIES_NRF54L) */
+ 
+-	IRQ_CONNECT(DT_IRQN(VPR_NODE), DT_IRQ(VPR_NODE, priority),
+-		    nrfx_isr, nrf_sqspi_irq_handler, 0);
++	IRQ_CONNECT(DT_IRQN(VPR_NODE), DT_IRQ(VPR_NODE, priority), nrfx_isr, nrf_sqspi_irq_handler,
++		    0);
+ 
+ 	err = nrf_sqspi_init(&dev_config->sqspi, &sqspi_cfg);
+ 	if (err != NRFX_SUCCESS) {
+@@ -523,11 +521,9 @@ static int dev_init(const struct device *dev)
+ 	}
+ 
+ 	for (ce_gpio = dev_config->ce_gpios;
+-	     ce_gpio < &dev_config->ce_gpios[dev_config->ce_gpios_len];
+-	     ce_gpio++) {
++	     ce_gpio < &dev_config->ce_gpios[dev_config->ce_gpios_len]; ce_gpio++) {
+ 		if (!device_is_ready(ce_gpio->port)) {
+-			LOG_ERR("CE GPIO port %s is not ready",
+-				ce_gpio->port->name);
++			LOG_ERR("CE GPIO port %s is not ready", ce_gpio->port->name);
+ 			return -ENODEV;
+ 		}
+ 
+@@ -549,38 +545,34 @@ static int dev_init(const struct device *dev)
+ }
+ 
+ static DEVICE_API(mspi, drv_api) = {
+-	.config             = api_config,
+-	.dev_config         = api_dev_config,
++	.config = api_config,
++	.dev_config = api_dev_config,
+ 	.get_channel_status = api_get_channel_status,
+-	.transceive         = api_transceive,
++	.transceive = api_transceive,
+ };
+ 
+-#define FOREACH_CE_GPIOS_ELEM(inst)					\
+-	DT_INST_FOREACH_PROP_ELEM_SEP(inst, ce_gpios,			\
+-				      GPIO_DT_SPEC_GET_BY_IDX, (,))
+-#define MSPI_SQSPI_CE_GPIOS(inst)					\
+-	.ce_gpios = (const struct gpio_dt_spec [])			\
+-		{ FOREACH_CE_GPIOS_ELEM(inst) },			\
++#define FOREACH_CE_GPIOS_ELEM(inst)                                                                \
++	DT_INST_FOREACH_PROP_ELEM_SEP(inst, ce_gpios, GPIO_DT_SPEC_GET_BY_IDX, (, ))
++#define MSPI_SQSPI_CE_GPIOS(inst)                                                                  \
++	.ce_gpios = (const struct gpio_dt_spec[]){FOREACH_CE_GPIOS_ELEM(inst)},                    \
+ 	.ce_gpios_len = DT_INST_PROP_LEN(inst, ce_gpios),
+ 
+-#define MSPI_SQSPI_INST(inst)						\
+-	PM_DEVICE_DT_INST_DEFINE(inst, dev_pm_action_cb);		\
+-	PINCTRL_DT_DEFINE(VPR_NODE);					\
+-	static struct mspi_sqspi_data dev##inst##_data;			\
+-	static const struct mspi_sqspi_config dev##inst##_config = {	\
+-		.sqspi = {						\
+-			.p_reg = (void *)DT_INST_REG_ADDR(inst),	\
+-			.drv_inst_idx = 0,				\
+-		},							\
+-		.pcfg = PINCTRL_DT_DEV_CONFIG_GET(VPR_NODE),		\
+-		.mem_reg = DMM_DEV_TO_REG(DT_DRV_INST(inst)),		\
+-	IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, ce_gpios),		\
+-		(MSPI_SQSPI_CE_GPIOS(inst)))				\
+-	};								\
+-	DEVICE_DT_INST_DEFINE(inst,					\
+-		dev_init, PM_DEVICE_DT_INST_GET(inst),			\
+-		&dev##inst##_data, &dev##inst##_config,			\
+-		POST_KERNEL, CONFIG_MSPI_INIT_PRIORITY,			\
+-		&drv_api);
++#define MSPI_SQSPI_INST(inst)                                                                      \
++	PM_DEVICE_DT_INST_DEFINE(inst, dev_pm_action_cb);                                          \
++	PINCTRL_DT_DEFINE(VPR_NODE);                                                               \
++	static struct mspi_sqspi_data dev##inst##_data;                                            \
++	static const struct mspi_sqspi_config dev##inst##_config = {                               \
++		.sqspi =                                                                           \
++			{                                                                          \
++				.p_reg = (void *)DT_INST_REG_ADDR(inst),                           \
++				.drv_inst_idx = 0,                                                 \
++			},                                                                         \
++		.pcfg = PINCTRL_DT_DEV_CONFIG_GET(VPR_NODE),                                       \
++		.mem_reg = DMM_DEV_TO_REG(DT_DRV_INST(inst)),                                      \
++		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, ce_gpios),		\
++		(MSPI_SQSPI_CE_GPIOS(inst))) };  \
++	DEVICE_DT_INST_DEFINE(inst, dev_init, PM_DEVICE_DT_INST_GET(inst), &dev##inst##_data,      \
++			      &dev##inst##_config, POST_KERNEL, CONFIG_MSPI_INIT_PRIORITY,         \
++			      &drv_api);
+ 
+ MSPI_SQSPI_INST(0);
+-- 
+2.50.1 (Apple Git-155)
+

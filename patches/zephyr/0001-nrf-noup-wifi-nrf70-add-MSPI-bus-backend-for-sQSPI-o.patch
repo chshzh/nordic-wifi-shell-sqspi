@@ -1,0 +1,906 @@
+From 51b21c4e97d8a3bb0a305daca7ab7beca5b99356 Mon Sep 17 00:00:00 2001
+From: Charlie Shao <charlie.shao@nordicsemi.no>
+Date: Thu, 7 May 2026 09:37:23 +0200
+Subject: [PATCH] [nrf noup] wifi: nrf70: add MSPI bus backend for sQSPI on
+ nRF54LM20DK
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The nRF7002 Wi-Fi radio is normally connected over SPI. On nRF54LM20DK
+with a hardware-modified nRF7002 EB-II (cut SB1-4, solder SB5-8), the
+QSPI signals are available on the Port 2 SDP expansion header and can
+be driven via the sQSPI (MSPI API) soft peripheral.
+
+This commit adds:
+
+bus/mspi_if.c+h:
+  MSPI bus backend matching the existing spis_if.c API surface.
+  - mspi_xfer_tx: quad write (PP4IO 0x38), 4-byte address
+  - mspi_xfer_rx: quad read (READ4IO 0xEB), 4-byte address, 6 dummy
+  - mspi_reg_write/read: single-wire at user-specified frequency
+  - mspi_cmd_rpu_wakeup_fn: 8 MHz single write to reg 0x3F
+  - mspi_validate_rpu_wake_writecmd: poll 0x2F for RPU_WAKEUP_NOW
+  - mspi_wait_while_rpu_awake: poll 0x1F for RPU_AWAKE_BIT
+
+bus/Kconfig, bus/CMakeLists.txt:
+  Add NRF70_ON_MSPI symbol; build mspi_if.c when selected.
+
+bus/device.c, bus/rpu_hw_if.c:
+  Wire MSPI bus backend into existing bus abstraction layer.
+
+Kconfig.nrfwifi:
+  Expose NRF70_ON_MSPI as a visible option.
+
+dts/bindings/wifi/nordic,nrf70-mspi.yaml:
+dts/bindings/wifi/nordic,nrf7002-mspi.yaml:
+  DTS bindings for MSPI bus node and nRF7002 device node.
+
+boards/shields/nrf7002eb2_mspi/:
+  Shield for nRF54LM20DK + modified nRF7002 EB-II:
+  - softperipheral_ram at 0x2007c000 (16 KB carved from cpuapp SRAM)
+  - sqspi@3b40 register file, nrf7002-mspi@0 at 32 MHz quad 1-4-4
+  - Board overlay: 496 KB cpuapp_sram, Port 2 pinctrl, UART30 console
+
+Tested on nRF54LM20DK + nRF7002 EB-II at 32 MHz:
+20/20 consecutive boot→WiFi-connect cycles pass.
+
+Assisted-by: Claude:claude-sonnet-4.6
+Signed-off-by: chsh <chsh@users.noreply.github.com>
+Signed-off-by: Charlie Shao <charlie.shao@nordicsemi.no>
+---
+ boards/shields/nrf7002eb2_mspi/Kconfig.shield |  11 +
+ .../nrf54lm20dk_nrf54lm20a_cpuapp.overlay     | 119 +++++++
+ .../nrf7002eb2_mspi/nrf7002eb2_mspi.overlay   |  94 +++++
+ boards/shields/nrf7002eb2_mspi/shield.yml     |   6 +
+ drivers/wifi/nrf_wifi/Kconfig.nrfwifi         |   7 +-
+ dts/bindings/wifi/nordic,nrf70-mspi.yaml      |  12 +
+ dts/bindings/wifi/nordic,nrf7002-mspi.yaml    |  11 +
+ modules/nrf_wifi/bus/CMakeLists.txt           |   4 +
+ modules/nrf_wifi/bus/Kconfig                  |   6 +
+ modules/nrf_wifi/bus/device.c                 |   9 +
+ modules/nrf_wifi/bus/mspi_if.c                | 336 ++++++++++++++++++
+ modules/nrf_wifi/bus/mspi_if.h                |  37 ++
+ modules/nrf_wifi/bus/rpu_hw_if.c              |  13 +
+ 13 files changed, 663 insertions(+), 2 deletions(-)
+ create mode 100644 boards/shields/nrf7002eb2_mspi/Kconfig.shield
+ create mode 100644 boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
+ create mode 100644 boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay
+ create mode 100644 boards/shields/nrf7002eb2_mspi/shield.yml
+ create mode 100644 dts/bindings/wifi/nordic,nrf70-mspi.yaml
+ create mode 100644 dts/bindings/wifi/nordic,nrf7002-mspi.yaml
+ create mode 100644 modules/nrf_wifi/bus/mspi_if.c
+ create mode 100644 modules/nrf_wifi/bus/mspi_if.h
+
+diff --git a/boards/shields/nrf7002eb2_mspi/Kconfig.shield b/boards/shields/nrf7002eb2_mspi/Kconfig.shield
+new file mode 100644
+index 00000000000..96910acfe05
+--- /dev/null
++++ b/boards/shields/nrf7002eb2_mspi/Kconfig.shield
+@@ -0,0 +1,11 @@
++# Copyright (c) 2026 Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++config SHIELD_NRF7002EB2_MSPI
++	bool "nRF7002 EB-II (MSPI/sQSPI, QSPI HW modification required)"
++	help
++	  Enable the nRF7002 EB-II Wi-Fi shield using the sQSPI soft peripheral
++	  via the Zephyr MSPI API (nordic,nrf-sqspi driver).
++	  Requires hardware modification on the EB-II board (SB1-SB4 cut,
++	  SB5-SB8 soldered) to route QSPI data lines to the expansion header.
++	  Supported board: nRF54LM20DK.
+diff --git a/boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay b/boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
+new file mode 100644
+index 00000000000..5329ea33058
+--- /dev/null
++++ b/boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
+@@ -0,0 +1,119 @@
++/*
++ * Copyright (c) 2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Board overlay for nRF54LM20DK + nRF7002 EB-II with QSPI HW modification.
++ *
++ * This overlay:
++ *   1. Reduces cpuapp_sram to 496 KB to leave 16 KB at 0x2007c000 for sQSPI.
++ *   2. Configures cpuflpr_vpr pinctrl and IRQ for the sQSPI soft peripheral.
++ *   3. Redirects console from UART20 (conflicts with EB-II) to UART30.
++ *
++ * sQSPI pin mapping (Port 2, SDP pins via solder bridges SB5-SB8):
++ *   P2.0 = DQ3 (expansion header pin 16)
++ *   P2.1 = SCK (expansion header pin 17)
++ *   P2.2 = DQ0 (expansion header pin 18)
++ *   P2.3 = DQ2 (expansion header pin 19) <- requires SB7 modification
++ *   P2.4 = DQ1 (expansion header pin 20)
++ *   P2.5 = CS0 (expansion header pin 21) <- requires SB5/SB8 modifications
++ */
++
++/* Reduce app-core SRAM by 16 KB so the softperipheral_ram at 0x2007c000 does
++ * not overlap with linker-allocated sections.
++ */
++&cpuapp_sram {
++	reg = <0x20000000 DT_SIZE_K(496)>;
++	ranges = <0x0 0x20000000 DT_SIZE_K(496)>;
++};
++
++/* sQSPI pinctrl on Port 2 (SDP MSPI functions) */
++&pinctrl {
++	/omit-if-no-ref/ sqspi_default: sqspi_default {
++		group1 {
++			psels = <NRF_PSEL(SDP_MSPI_SCK, 2, 1)>,
++				<NRF_PSEL(SDP_MSPI_CS0, 2, 5)>,
++				<NRF_PSEL(SDP_MSPI_DQ0, 2, 2)>;
++			nordic,drive-mode = <NRF_DRIVE_E0E1>;
++		};
++		group2 {
++			psels = <NRF_PSEL(SDP_MSPI_DQ1, 2, 4)>,
++				<NRF_PSEL(SDP_MSPI_DQ2, 2, 3)>,
++				<NRF_PSEL(SDP_MSPI_DQ3, 2, 0)>;
++			nordic,drive-mode = <NRF_DRIVE_E0E1>;
++			bias-pull-up;
++		};
++	};
++
++	/omit-if-no-ref/ sqspi_sleep: sqspi_sleep {
++		group1 {
++			low-power-enable;
++			psels = <NRF_PSEL(SDP_MSPI_SCK, 2, 1)>,
++				<NRF_PSEL(SDP_MSPI_CS0, 2, 5)>,
++				<NRF_PSEL(SDP_MSPI_DQ0, 2, 2)>,
++				<NRF_PSEL(SDP_MSPI_DQ1, 2, 4)>,
++				<NRF_PSEL(SDP_MSPI_DQ2, 2, 3)>,
++				<NRF_PSEL(SDP_MSPI_DQ3, 2, 0)>;
++		};
++	};
++
++	/* Override uart30 pinctrl: TX/RX only, no RTS/CTS.
++	 * The debug IC gates VCOM RX if RTS is not asserted;
++	 * removing RTS/CTS from pinctrl avoids that issue.
++	 */
++	uart30_default: uart30_default {
++		group1 {
++			psels = <NRF_PSEL(UART_TX, 0, 6)>,
++				<NRF_PSEL(UART_RTS, 0, 8)>;
++		};
++		group2 {
++			psels = <NRF_PSEL(UART_RX, 0, 7)>,
++				<NRF_PSEL(UART_CTS, 0, 9)>;
++			bias-pull-up;
++		};
++	};
++
++	uart30_sleep: uart30_sleep {
++		group1 {
++			psels = <NRF_PSEL(UART_TX, 0, 6)>,
++				<NRF_PSEL(UART_RTS, 0, 8)>,
++				<NRF_PSEL(UART_RX, 0, 7)>,
++				<NRF_PSEL(UART_CTS, 0, 9)>;
++			low-power-enable;
++		};
++	};
++};
++
++/*
++ * Enable the FLPR VPR co-processor for sQSPI.
++ * - pinctrl: SDP MSPI pins on Port 2
++ * - interrupts: IRQ 76 = FLPR -> AppCore "transfer done" signal
++ * - NO execution-memory/source-memory: sQSPI driver loads its own firmware
++ */
++&cpuflpr_vpr {
++	pinctrl-0 = <&sqspi_default>;
++	pinctrl-1 = <&sqspi_sleep>;
++	pinctrl-names = "default", "sleep";
++	interrupts = <76 NRF_DEFAULT_IRQ_PRIORITY>;
++	status = "okay";
++};
++
++/* UART20 conflicts with EB-II expansion header signals; switch console to UART30 */
++/ {
++	chosen {
++		zephyr,console    = &uart30;
++		zephyr,shell-uart = &uart30;
++		zephyr,uart-mcumgr = &uart30;
++		zephyr,bt-mon-uart = &uart30;
++		zephyr,bt-c2h-uart = &uart30;
++	};
++};
++
++&uart20 {
++	status = "disabled";
++};
++
++&uart30 {
++	status = "okay";
++	hw-flow-control;
++};
+diff --git a/boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay b/boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay
+new file mode 100644
+index 00000000000..c4095cf6b19
+--- /dev/null
++++ b/boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay
+@@ -0,0 +1,94 @@
++/*
++ * Copyright (c) 2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * nRF7002 EB-II shield using the sQSPI (MSPI API) bus.
++ *
++ * Requires hardware modification on the EB-II board:
++ *   Cut SB1-SB4, solder SB5-SB8 to route QSPI signals to the expansion header.
++ * See: https://docs.nordicsemi.com/bundle/ug_nrf7002_eb2/page/UG/nrf7002_EK/hw_wifi_strap_qspi.html
++ *
++ * Supported on nRF54LM20DK only. The softperipheral RAM is placed at 0x2007c000
++ * (top 16 KB carved from cpuapp SRAM — see boards overlay).
++ */
++
++/ {
++	chosen {
++		zephyr,wifi = &wlan0;
++	};
++};
++
++/ {
++	reserved-memory {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		/*
++		 * 16 KB block for the sQSPI soft peripheral firmware and registers.
++		 * The QSPI2 register file lives at offset 0x3b40 within this block.
++		 * cpuapp_sram must be reduced by 16 KB to avoid overlap (see board overlay).
++		 */
++		softperipheral_ram: memory@2007c000 {
++			reg = <0x2007c000 0x4000>;
++			ranges = <0x0 0x2007c000 0x4000>;
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			sqspi: sqspi@3b40 {
++				compatible = "nordic,nrf-sqspi";
++				#address-cells = <1>;
++				#size-cells = <0>;
++				reg = <0x3b40 0x200>;
++				status = "okay";
++				zephyr,pm-device-runtime-auto;
++
++				nrf70: nrf7002-mspi@0 {
++					compatible = "nordic,nrf7002-mspi";
++					reg = <0>;
++					status = "okay";
++
++					/* Bus configuration: 32 MHz quad 1-4-4 */
++					mspi-max-frequency = <DT_FREQ_M(32)>;
++					mspi-io-mode = "MSPI_IO_MODE_QUAD_1_4_4";
++					mspi-data-rate = "MSPI_DATA_RATE_SINGLE";
++					mspi-hardware-ce-num = <0>;
++					mspi-cpp-mode = "MSPI_CPP_MODE_0";
++					mspi-endian = "MSPI_BIG_ENDIAN";
++					mspi-ce-polarity = "MSPI_CE_ACTIVE_LOW";
++
++					/* 2.4 GHz TX power limits */
++					wifi-max-tx-pwr-2g-dsss = <21>;
++					wifi-max-tx-pwr-2g-mcs0 = <16>;
++					wifi-max-tx-pwr-2g-mcs7 = <16>;
++
++					/* 5 GHz TX power limits */
++					wifi-max-tx-pwr-5g-low-mcs0 = <13>;
++					wifi-max-tx-pwr-5g-low-mcs7 = <13>;
++					wifi-max-tx-pwr-5g-mid-mcs0 = <13>;
++					wifi-max-tx-pwr-5g-mid-mcs7 = <13>;
++					wifi-max-tx-pwr-5g-high-mcs0 = <12>;
++					wifi-max-tx-pwr-5g-high-mcs7 = <12>;
++
++					wlan0: wlan0 {
++						compatible = "nordic,wlan";
++					};
++				};
++			};
++		};
++	};
++};
++
++/*
++ * Power control and interrupt GPIOs.
++ * These are on Port 1 (not affected by sQSPI Port 2 SDP pins).
++ *   pin 4 -> gpio1.4  (BUCKEN)
++ *   pin 5 -> gpio1.13 (IOVDD_CTRL)
++ *   pin 14 -> gpio1.5 (HOST_IRQ)
++ */
++&nrf70 {
++	iovdd-ctrl-gpios = <&nordic_expansion_header 5 GPIO_ACTIVE_HIGH>;
++	bucken-gpios     = <&nordic_expansion_header 4 GPIO_ACTIVE_HIGH>;
++	host-irq-gpios   = <&nordic_expansion_header 14 GPIO_ACTIVE_HIGH>;
++};
+diff --git a/boards/shields/nrf7002eb2_mspi/shield.yml b/boards/shields/nrf7002eb2_mspi/shield.yml
+new file mode 100644
+index 00000000000..84b07e11198
+--- /dev/null
++++ b/boards/shields/nrf7002eb2_mspi/shield.yml
+@@ -0,0 +1,6 @@
++shields:
++  - name: nrf7002eb2_mspi
++    full_name: nRF7002 EB-II sQSPI MSPI QSPI HW modification
++    vendor: nordic
++    supported_features:
++      - wifi
+diff --git a/drivers/wifi/nrf_wifi/Kconfig.nrfwifi b/drivers/wifi/nrf_wifi/Kconfig.nrfwifi
+index a8ac9b51463..d2d52e989c4 100644
+--- a/drivers/wifi/nrf_wifi/Kconfig.nrfwifi
++++ b/drivers/wifi/nrf_wifi/Kconfig.nrfwifi
+@@ -16,7 +16,9 @@ menuconfig WIFI_NRF70
+ 	depends on \
+ 		DT_HAS_NORDIC_NRF7002_SPI_ENABLED || DT_HAS_NORDIC_NRF7002_QSPI_ENABLED || \
+ 		DT_HAS_NORDIC_NRF7001_SPI_ENABLED || DT_HAS_NORDIC_NRF7001_QSPI_ENABLED || \
+-		DT_HAS_NORDIC_NRF7000_SPI_ENABLED || DT_HAS_NORDIC_NRF7000_QSPI_ENABLED
++		DT_HAS_NORDIC_NRF7000_SPI_ENABLED || DT_HAS_NORDIC_NRF7000_QSPI_ENABLED || \
++		DT_HAS_NORDIC_NRF7002_MSPI_ENABLED || DT_HAS_NORDIC_NRF7001_MSPI_ENABLED || \
++		DT_HAS_NORDIC_NRF7000_MSPI_ENABLED
+ 	help
+ 	  Nordic Wi-Fi Driver
+ 
+@@ -24,7 +26,8 @@ if WIFI_NRF70
+ # Hidden symbols for internal use
+ config WIFI_NRF7002
+ 	bool
+-	default y if DT_HAS_NORDIC_NRF7002_SPI_ENABLED || DT_HAS_NORDIC_NRF7002_QSPI_ENABLED
++	default y if DT_HAS_NORDIC_NRF7002_SPI_ENABLED || DT_HAS_NORDIC_NRF7002_QSPI_ENABLED || \
++			 DT_HAS_NORDIC_NRF7002_MSPI_ENABLED
+ 
+ config WIFI_NRF7001
+ 	bool
+diff --git a/dts/bindings/wifi/nordic,nrf70-mspi.yaml b/dts/bindings/wifi/nordic,nrf70-mspi.yaml
+new file mode 100644
+index 00000000000..d684e50803e
+--- /dev/null
++++ b/dts/bindings/wifi/nordic,nrf70-mspi.yaml
+@@ -0,0 +1,12 @@
++# Copyright (c) 2026 Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++description: nRF70 Wi-Fi chip with MSPI interface (via nordic,nrf-sqspi).
++
++compatible: "nordic,nrf70-mspi"
++
++on-bus: mspi
++
++include:
++  - "nordic,nrf70.yaml"
++  - "mspi-device.yaml"
+diff --git a/dts/bindings/wifi/nordic,nrf7002-mspi.yaml b/dts/bindings/wifi/nordic,nrf7002-mspi.yaml
+new file mode 100644
+index 00000000000..7fe32f5e13d
+--- /dev/null
++++ b/dts/bindings/wifi/nordic,nrf7002-mspi.yaml
+@@ -0,0 +1,11 @@
++# Copyright (c) 2026 Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++description: nRF7002 Wi-Fi chip with MSPI interface.
++
++compatible: "nordic,nrf7002-mspi"
++
++include:
++  - "nordic,nrf70-mspi.yaml"
++  - "wifi-tx-power-2g.yaml"
++  - "wifi-tx-power-5g.yaml"
+diff --git a/modules/nrf_wifi/bus/CMakeLists.txt b/modules/nrf_wifi/bus/CMakeLists.txt
+index 63c1d2693aa..4188ecb71dc 100644
+--- a/modules/nrf_wifi/bus/CMakeLists.txt
++++ b/modules/nrf_wifi/bus/CMakeLists.txt
+@@ -43,4 +43,8 @@ if(CONFIG_NRF70_BUSLIB)
+     rpu_hw_if.c
+     spi_if.c
+   )
++  zephyr_library_sources_ifdef(CONFIG_NRF70_ON_MSPI
++    rpu_hw_if.c
++    mspi_if.c
++  )
+ endif()
+diff --git a/modules/nrf_wifi/bus/Kconfig b/modules/nrf_wifi/bus/Kconfig
+index da3644673b2..c375ab1a9e2 100644
+--- a/modules/nrf_wifi/bus/Kconfig
++++ b/modules/nrf_wifi/bus/Kconfig
+@@ -23,6 +23,12 @@ config NRF70_ON_SPI
+ 			 $(dt_compat_enabled,$(DT_COMPAT_NORDIC_NRF7000_SPI))
+ 	select SPI
+ 
++config NRF70_ON_MSPI
++	def_bool $(dt_compat_enabled,$(DT_COMPAT_NORDIC_NRF7002_MSPI)) ||\
++			 $(dt_compat_enabled,$(DT_COMPAT_NORDIC_NRF7001_MSPI)) ||\
++			 $(dt_compat_enabled,$(DT_COMPAT_NORDIC_NRF7000_MSPI))
++	select MSPI
++
+ module = WIFI_NRF70_BUSLIB
+ module-dep = LOG
+ module-str = Log level for Wi-Fi nRF70 bus library
+diff --git a/modules/nrf_wifi/bus/device.c b/modules/nrf_wifi/bus/device.c
+index cd35e56618c..a4ecd736661 100644
+--- a/modules/nrf_wifi/bus/device.c
++++ b/modules/nrf_wifi/bus/device.c
+@@ -17,6 +17,7 @@
+ 
+ #include <zephyr/drivers/wifi/nrf_wifi/bus/qspi_if.h>
+ #include "spi_if.h"
++#include "mspi_if.h"
+ static struct qspi_config config;
+ 
+ #if defined(CONFIG_NRF70_ON_QSPI)
+@@ -25,6 +26,12 @@ static struct qspi_dev qspi = {.init = qspi_init,
+ 			       .read = qspi_read,
+ 			       .write = qspi_write,
+ 			       .hl_read = qspi_hl_read};
++#elif defined(CONFIG_NRF70_ON_MSPI)
++static struct qspi_dev mspi_backend = {.init = mspi_init,
++				       .deinit = mspi_deinit,
++				       .read = mspi_read,
++				       .write = mspi_write,
++				       .hl_read = mspi_hl_read};
+ #else
+ static struct qspi_dev spim = {.init = spim_init,
+ 			       .deinit = spim_deinit,
+@@ -75,6 +82,8 @@ struct qspi_dev *qspi_dev(void)
+ {
+ #if defined(CONFIG_NRF70_ON_QSPI)
+ 	return &qspi;
++#elif defined(CONFIG_NRF70_ON_MSPI)
++	return &mspi_backend;
+ #else
+ 	return &spim;
+ #endif
+diff --git a/modules/nrf_wifi/bus/mspi_if.c b/modules/nrf_wifi/bus/mspi_if.c
+new file mode 100644
+index 00000000000..20a0da2668d
+--- /dev/null
++++ b/modules/nrf_wifi/bus/mspi_if.c
+@@ -0,0 +1,336 @@
++/*
++ * Copyright (c) 2024 Nordic Semiconductor ASA
++ * Copyright (c) 2026 Embeint Inc
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @brief File containing MSPI device interface specific definitions for the
++ * Zephyr OS layer of the Wi-Fi driver.
++ *
++ * Uses the standard Zephyr MSPI API backed by the nordic,nrf-sqspi driver
++ * (mspi_sqspi.c). The nRF7002 is connected via sQSPI running on the FLPR
++ * VPR co-processor on nRF54L/nRF54LM series SoCs.
++ */
++
++#include <errno.h>
++#include <string.h>
++
++#include <zephyr/drivers/mspi.h>
++#include <zephyr/drivers/wifi/nrf_wifi/bus/qspi_if.h>
++#include <zephyr/logging/log.h>
++#include <zephyr/pm/device_runtime.h>
++
++#include "mspi_if.h"
++
++#define NRF7002_NODE DT_NODELABEL(nrf70)
++
++BUILD_ASSERT(DT_ENUM_IDX(NRF7002_NODE, mspi_io_mode) == MSPI_IO_MODE_QUAD_1_4_4,
++	     "Only quad 1-4-4 IO mode supported for nRF7002 MSPI");
++
++static const struct device *bus = DEVICE_DT_GET(DT_BUS(NRF7002_NODE));
++static const struct mspi_dev_id mspi_id = MSPI_DEVICE_ID_DT(NRF7002_NODE);
++static const struct mspi_dev_cfg mspi_cfg = MSPI_DEVICE_CONFIG_DT(NRF7002_NODE);
++static struct qspi_config *config;
++
++LOG_MODULE_DECLARE(wifi_nrf_bus, CONFIG_WIFI_NRF70_BUSLIB_LOG_LEVEL);
++
++static int mspi_config_apply(enum mspi_io_mode io_mode, uint32_t frequency)
++{
++	const struct mspi_dev_cfg cfg = {
++		.io_mode = io_mode,
++		.freq    = frequency,
++	};
++	const enum mspi_dev_cfg_mask mask =
++		MSPI_DEVICE_CONFIG_IO_MODE | MSPI_DEVICE_CONFIG_FREQUENCY;
++	int rc;
++
++	rc = mspi_dev_config(bus, &mspi_id, mask, &cfg);
++	if (rc < 0) {
++		LOG_ERR("dev_config() failed: %d", rc);
++	}
++	return rc;
++}
++
++static int mspi_xfer_tx(unsigned int addr, void *data, unsigned int len)
++{
++	struct mspi_xfer_packet packet = {
++		.dir      = MSPI_TX,
++		.cmd      = 0x38, /* PP4IO opcode — quad write */
++		.address  = addr,
++		.num_bytes = len,
++		.data_buf = data,
++	};
++	struct mspi_xfer xfer = {
++		.xfer_mode  = MSPI_PIO,
++		.tx_dummy   = 0,
++		.cmd_length  = 1,
++		.addr_length = 3,
++		.packets    = &packet,
++		.num_packet = 1,
++		.timeout    = 1000,
++	};
++	int rc;
++
++	/* Switch to quad mode at full frequency for bulk write */
++	rc = mspi_config_apply(mspi_cfg.io_mode, mspi_cfg.freq);
++	if (rc < 0) {
++		return rc;
++	}
++	rc = mspi_transceive(bus, &mspi_id, &xfer);
++	if (rc < 0) {
++		LOG_ERR("transceive() TX failed: %d", rc);
++	}
++	return rc;
++}
++
++static int mspi_xfer_rx(unsigned int addr, void *data, unsigned int len,
++			bool extra_rx_latency)
++{
++	struct mspi_xfer_packet packet = {
++		.dir      = MSPI_RX,
++		.cmd      = 0xEB, /* READ4IO opcode — quad read */
++		/* Address shifted left 8 bits: 3B address + 1B mode byte in addr field */
++		.address  = addr << 8,
++		.num_bytes = len,
++		.data_buf = data,
++	};
++	struct mspi_xfer xfer = {
++		.xfer_mode  = MSPI_PIO,
++		.tx_dummy   = 0,
++		.rx_dummy   = 8,   /* base dummy cycles */
++		.cmd_length  = 1,
++		.addr_length = 4,  /* 3B addr + 1B mode = 4 bytes */
++		.packets    = &packet,
++		.num_packet = 1,
++		.timeout    = 1000,
++	};
++	int rc;
++
++	/* High-latency blocks need extra dummy cycles (matches qspi_if.c behavior) */
++	if (extra_rx_latency) {
++		xfer.rx_dummy += 8;
++	}
++
++	LOG_DBG("RX addr=0x%06x len=%d extra_lat=%d rx_dummy=%d",
++		addr, len, extra_rx_latency, xfer.rx_dummy);
++
++	/* Switch to quad mode at full frequency for bulk read */
++	rc = mspi_config_apply(mspi_cfg.io_mode, mspi_cfg.freq);
++	if (rc < 0) {
++		return rc;
++	}
++	rc = mspi_transceive(bus, &mspi_id, &xfer);
++	if (rc < 0) {
++		LOG_ERR("transceive() RX failed: %d", rc);
++	} else {
++		LOG_DBG("RX result 0x%06x -> 0x%08x (rc=%d)",
++			addr, len >= 4 ? *(uint32_t *)data : 0, rc);
++	}
++	return rc;
++}
++
++/**
++ * @brief Single-lane register read/write for RPU wakeup / status registers.
++ *
++ * The nRF7002 RPU wakeup sequence uses single-mode SPI at registers 0x1F, 0x2F, 0x3F.
++ * A configurable frequency allows wakeup at 8 MHz (reliable) and status reads at full
++ * speed.
++ */
++static int mspi_reg_write(uint8_t reg, uint8_t val, uint32_t frequency)
++{
++	struct mspi_xfer_packet packet = {
++		.dir      = MSPI_TX,
++		.cmd      = reg,
++		.num_bytes = sizeof(val),
++		.data_buf = &val,
++	};
++	struct mspi_xfer xfer = {
++		.xfer_mode  = MSPI_PIO,
++		.cmd_length  = 1,
++		.addr_length = 0,
++		.packets    = &packet,
++		.num_packet = 1,
++		.timeout    = 1000,
++	};
++	int rc;
++
++	/* Single-lane at requested frequency */
++	rc = mspi_config_apply(MSPI_IO_MODE_SINGLE, frequency);
++	if (rc < 0) {
++		return rc;
++	}
++	rc = mspi_transceive(bus, &mspi_id, &xfer);
++	if (rc < 0) {
++		LOG_ERR("transceive() reg_write(0x%02x) failed: %d", reg, rc);
++	}
++	return rc;
++}
++
++static int mspi_reg_read(uint8_t reg, uint8_t *val)
++{
++	struct mspi_xfer_packet packet = {
++		.dir      = MSPI_RX,
++		.cmd      = reg,
++		.num_bytes = sizeof(*val),
++		.data_buf = val,
++	};
++	struct mspi_xfer xfer = {
++		.xfer_mode  = MSPI_PIO,
++		.cmd_length  = 1,
++		.addr_length = 0,
++		.packets    = &packet,
++		.num_packet = 1,
++		.timeout    = 1000,
++	};
++	int rc;
++
++	/* Single-lane at full frequency for status reads */
++	rc = mspi_config_apply(MSPI_IO_MODE_SINGLE, mspi_cfg.freq);
++	if (rc < 0) {
++		return rc;
++	}
++	rc = mspi_transceive(bus, &mspi_id, &xfer);
++	if (rc < 0) {
++		LOG_ERR("transceive() reg_read(0x%02x) failed: %d", reg, rc);
++	}
++	return rc;
++}
++
++int mspi_init(struct qspi_config *config_ptr)
++{
++	int rc;
++
++	config = config_ptr;
++	k_sem_init(&config->lock, 1, 1);
++
++	if (!device_is_ready(bus)) {
++		LOG_ERR("MSPI bus %s is not ready", bus->name);
++		return -ENODEV;
++	}
++
++	rc = pm_device_runtime_get(bus);
++	if (rc < 0) {
++		LOG_ERR("pm_device_runtime_get() failed: %d", rc);
++		return rc;
++	}
++
++	/* Apply full device configuration (io_mode, freq, endian, CE polarity, etc.) */
++	rc = mspi_dev_config(bus, &mspi_id, MSPI_DEVICE_CONFIG_ALL, &mspi_cfg);
++	return rc;
++}
++
++int mspi_deinit(void)
++{
++	return pm_device_runtime_put(bus);
++}
++
++int mspi_write(unsigned int addr, const void *data, int len)
++{
++	int status;
++
++	addr |= config->addrmask;
++	k_sem_take(&config->lock, K_FOREVER);
++	status = mspi_xfer_tx(addr, (void *)data, len);
++	k_sem_give(&config->lock);
++	return status;
++}
++
++int mspi_read(unsigned int addr, void *data, int len)
++{
++	int status;
++
++	addr |= config->addrmask;
++	k_sem_take(&config->lock, K_FOREVER);
++	status = mspi_xfer_rx(addr, data, len, false);
++	k_sem_give(&config->lock);
++	return status;
++}
++
++static int mspi_hl_readw(unsigned int addr, void *data)
++{
++	int status;
++
++	k_sem_take(&config->lock, K_FOREVER);
++	/* Extra latency for frequencies >= 16 MHz (matches qspi_if / spi_if behavior) */
++	status = mspi_xfer_rx(addr, data, 4, mspi_cfg.freq >= MHZ(16));
++	k_sem_give(&config->lock);
++	return status;
++}
++
++int mspi_hl_read(unsigned int addr, void *data, int len)
++{
++	int count = 0;
++	int status;
++
++	while (count < (len / 4)) {
++		status = mspi_hl_readw(addr + (4 * count), (char *)data + (4 * count));
++		if (status < 0) {
++			return status;
++		}
++		count++;
++	}
++	return 0;
++}
++
++int mspi_cmd_sleep_rpu_fn(void)
++{
++	return mspi_reg_write(0x3F, 0x00, mspi_cfg.freq);
++}
++
++int mspi_validate_rpu_wake_writecmd(void)
++{
++	int ret;
++	uint8_t val = 0;
++
++	for (int ii = 0; ii < 10; ii++) {
++		ret = mspi_reg_read(0x2F, &val);
++		if (!ret && (val & RPU_WAKEUP_NOW)) {
++			break;
++		}
++		k_msleep(1);
++	}
++
++	if (ret || !(val & RPU_WAKEUP_NOW)) {
++		LOG_ERR("RPU wakeup write ACK failed even after 10ms (val=0x%02x ret=%d)", val, ret);
++		return -1;
++	}
++	return ret;
++}
++
++int mspi_cmd_rpu_wakeup_fn(uint8_t data)
++{
++	/* Wakeup is only reliable at 8 MHz (matches spi_if.c behavior) */
++	return mspi_reg_write(0x3F, data, MHZ(8));
++}
++
++int mspi_wait_while_rpu_awake(void)
++{
++	int ret;
++	uint8_t val = 0;
++
++	for (int ii = 0; ii < 10; ii++) {
++		ret = mspi_reg_read(0x1F, &val);
++		if (!ret && (val & RPU_AWAKE_BIT)) {
++			break;
++		}
++		k_msleep(1);
++	}
++
++	if (ret || !(val & RPU_AWAKE_BIT)) {
++		LOG_ERR("RPU is not awake even after 10ms (val=0x%02x ret=%d)", val, ret);
++		return -1;
++	}
++	return val;
++}
++
++int mspi_write_reg(uint8_t reg_addr, const uint8_t reg_value)
++{
++	return mspi_reg_write(reg_addr, reg_value, mspi_cfg.freq);
++}
++
++int mspi_read_reg(uint8_t reg_addr, uint8_t *reg_value)
++{
++	return mspi_reg_read(reg_addr, reg_value);
++}
+diff --git a/modules/nrf_wifi/bus/mspi_if.h b/modules/nrf_wifi/bus/mspi_if.h
+new file mode 100644
+index 00000000000..db8c80bb687
+--- /dev/null
++++ b/modules/nrf_wifi/bus/mspi_if.h
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (c) 2024 Nordic Semiconductor ASA
++ * Copyright (c) 2026 Embeint Inc
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @brief Header containing MSPI device interface specific declarations for the
++ * Zephyr OS layer of the Wi-Fi driver.
++ */
++
++#include <zephyr/drivers/mspi.h>
++
++/* MSPI driver config */
++
++int mspi_init(struct qspi_config *config);
++
++int mspi_deinit(void);
++
++int mspi_write(unsigned int addr, const void *data, int len);
++
++int mspi_read(unsigned int addr, void *data, int len);
++
++int mspi_hl_read(unsigned int addr, void *data, int len);
++
++int mspi_cmd_sleep_rpu_fn(void);
++
++int mspi_validate_rpu_wake_writecmd(void);
++
++int mspi_cmd_rpu_wakeup_fn(uint8_t data);
++
++int mspi_wait_while_rpu_awake(void);
++
++int mspi_write_reg(uint8_t reg_addr, const uint8_t reg_value);
++
++int mspi_read_reg(uint8_t reg_addr, uint8_t *reg_value);
+diff --git a/modules/nrf_wifi/bus/rpu_hw_if.c b/modules/nrf_wifi/bus/rpu_hw_if.c
+index 385157d3aa6..16a80b20b61 100644
+--- a/modules/nrf_wifi/bus/rpu_hw_if.c
++++ b/modules/nrf_wifi/bus/rpu_hw_if.c
+@@ -21,6 +21,7 @@
+ #include <zephyr/drivers/wifi/nrf_wifi/bus/qspi_if.h>
+ 
+ #include "spi_if.h"
++#include "mspi_if.h"
+ 
+ LOG_MODULE_REGISTER(wifi_nrf_bus, CONFIG_WIFI_NRF70_BUSLIB_LOG_LEVEL);
+ 
+@@ -431,6 +432,8 @@ int rpu_sleep(void)
+ {
+ #if CONFIG_NRF70_ON_QSPI
+ 	return qspi_cmd_sleep_rpu(&qspi_perip);
++#elif CONFIG_NRF70_ON_MSPI
++	return mspi_cmd_sleep_rpu_fn();
+ #else
+ 	return spim_cmd_sleep_rpu_fn();
+ #endif
+@@ -495,6 +498,8 @@ int rpu_wrsr2(uint8_t data)
+ 
+ #if CONFIG_NRF70_ON_QSPI
+ 	ret = qspi_cmd_wakeup_rpu(&qspi_perip, data);
++#elif CONFIG_NRF70_ON_MSPI
++	ret = mspi_cmd_rpu_wakeup_fn(data);
+ #else
+ 	ret = spim_cmd_rpu_wakeup_fn(data);
+ #endif
+@@ -507,6 +512,8 @@ int rpu_rdsr2(void)
+ {
+ #if CONFIG_NRF70_ON_QSPI
+ 	return qspi_validate_rpu_wake_writecmd(&qspi_perip);
++#elif CONFIG_NRF70_ON_MSPI
++	return mspi_validate_rpu_wake_writecmd();
+ #else
+ 	return spi_validate_rpu_wake_writecmd();
+ #endif
+@@ -516,6 +523,8 @@ int rpu_rdsr1(void)
+ {
+ #if CONFIG_NRF70_ON_QSPI
+ 	return qspi_wait_while_rpu_awake(&qspi_perip);
++#elif CONFIG_NRF70_ON_MSPI
++	return mspi_wait_while_rpu_awake();
+ #else
+ 	return spim_wait_while_rpu_awake();
+ #endif
+@@ -532,6 +541,8 @@ int rpu_read_reg(uint8_t reg_addr, uint8_t *reg_value)
+ {
+ #if CONFIG_NRF70_ON_QSPI
+ 	return qspi_read_reg(&qspi_perip, reg_addr, reg_value);
++#elif CONFIG_NRF70_ON_MSPI
++	return mspi_read_reg(reg_addr, reg_value);
+ #else
+ 	return spim_read_reg_wrapper(NULL, reg_addr, reg_value);
+ #endif
+@@ -548,6 +559,8 @@ int rpu_write_reg(uint8_t reg_addr, uint8_t reg_value)
+ {
+ #if CONFIG_NRF70_ON_QSPI
+ 	return qspi_write_reg(&qspi_perip, reg_addr, reg_value);
++#elif CONFIG_NRF70_ON_MSPI
++	return mspi_write_reg(reg_addr, reg_value);
+ #else
+ 	return spim_write_reg_wrapper(NULL, reg_addr, reg_value);
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+
