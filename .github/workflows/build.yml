@@ -3,74 +3,102 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
+
+# Cancel in-progress runs for the same branch/PR to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Build firmware (nRF54LM20DK + nRF7002EB2 sQSPI)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Use the pre-built NCS v3.3.0 toolchain container — no nrfutil download needed.
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.0
 
     steps:
-      - name: Install nrfutil
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          path: workspace/nordic-wifi-shell-sqspi
+
+      # Cache the NCS repos to avoid full re-clone on every run.
+      # Key includes the patch files so a patch change invalidates the cache.
+      - name: Cache NCS workspace
+        id: cache-ncs
+        uses: actions/cache@v4
+        with:
+          path: |
+            workspace/nrf
+            workspace/zephyr
+            workspace/modules
+            workspace/nrfxlib
+            workspace/bootloader
+          key: ncs-v3.3.0-${{ hashFiles('workspace/nordic-wifi-shell-sqspi/west.yml', 'workspace/nordic-wifi-shell-sqspi/patches/**') }}
+
+      - name: Init NCS v3.3.0 workspace
+        if: steps.cache-ncs.outputs.cache-hit != 'true'
+        working-directory: workspace
         run: |
-          curl -sSfL https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/latest/nrfutil \
-            -o /usr/local/bin/nrfutil
-          chmod +x /usr/local/bin/nrfutil
-          nrfutil self-upgrade || true
+          git config --global --add safe.directory '*'
+          west init -l nordic-wifi-shell-sqspi
+          west update --narrow --fetch-opt=--depth=1 -n
 
-      - name: Install sdk-manager
-        run: nrfutil install sdk-manager
-
-      - name: Install NCS toolchain v3.3.0
-        run: nrfutil sdk-manager toolchain install --ncs-version v3.3.0
-
-      # west init uses this repo as the manifest source so it checks out the
-      # app at /ncs/nordic-wifi-shell-sqspi together with all NCS deps.
-      - name: Initialise NCS v3.3.0 workspace
+      # When restoring from cache the .west config is missing; re-run init (no-op if already there).
+      - name: Restore west config after cache hit
+        if: steps.cache-ncs.outputs.cache-hit == 'true'
+        working-directory: workspace
         run: |
-          nrfutil sdk-manager toolchain launch --ncs-version=v3.3.0 -- \
-            west init \
-              -m https://github.com/${{ github.repository }}.git \
-              --mr ${{ github.sha }} \
-              /ncs
-          nrfutil sdk-manager toolchain launch --ncs-version=v3.3.0 -- \
-            sh -c "cd /ncs && west update"
+          git config --global --add safe.directory '*'
+          west init -l nordic-wifi-shell-sqspi 2>/dev/null || true
 
-      # Apply the three format-patch files that ship with the app.
-      # Each patch sits in patches/<repo>/ and is applied on top of the
-      # corresponding v3.3.0 tag that west already checked out.
+      # Apply patches to nrfxlib, nrf, and zephyr on top of their v3.3.0 tags.
+      # Skips gracefully if a patch is already applied (cache hit scenario).
       - name: Apply upstream patches
-        working-directory: /ncs
+        working-directory: workspace
         run: |
-          PATCHES="nordic-wifi-shell-sqspi/patches"
+          git config --global --add safe.directory '*'
+          PATCHES="$(pwd)/nordic-wifi-shell-sqspi/patches"
 
-          git -C nrfxlib am \
-            "$(pwd)/$PATCHES/nrfxlib/"0001-*.patch
+          apply_if_needed() {
+            local repo="$1"
+            local patch="$2"
+            if git -C "$repo" am --check "$patch" 2>/dev/null; then
+              echo "Applying patch to $repo..."
+              git -C "$repo" am "$patch"
+            else
+              echo "Patch already applied or not applicable for $repo — skipping"
+            fi
+          }
 
-          git -C nrf am \
-            "$(pwd)/$PATCHES/nrf/"0001-*.patch
-
-          git -C zephyr am \
-            "$(pwd)/$PATCHES/zephyr/"0001-*.patch
+          apply_if_needed nrfxlib "$PATCHES/nrfxlib/"0001-*.patch
+          apply_if_needed nrf     "$PATCHES/nrf/"0001-*.patch
+          apply_if_needed zephyr  "$PATCHES/zephyr/"0001-*.patch
 
       - name: Build
-        working-directory: /ncs
+        working-directory: workspace
         run: |
-          nrfutil sdk-manager toolchain launch --ncs-version=v3.3.0 -- \
-            west build \
-              -b nrf54lm20dk/nrf54lm20a/cpuapp \
-              -p \
-              -d nordic-wifi-shell-sqspi/build \
-              nordic-wifi-shell-sqspi \
-              -- -DSHIELD=nrf7002eb2_mspi
+          west build \
+            -b nrf54lm20dk/nrf54lm20a/cpuapp \
+            -p \
+            -d nordic-wifi-shell-sqspi/build \
+            nordic-wifi-shell-sqspi \
+            -- -DSHIELD=nrf7002eb2_mspi
 
       - name: Collect artifacts
         run: |
           mkdir -p artifacts
-          cp /ncs/nordic-wifi-shell-sqspi/build/merged.hex artifacts/
-          cp /ncs/nordic-wifi-shell-sqspi/build/nordic-wifi-shell-sqspi/zephyr/zephyr.elf artifacts/ || true
+          HEX="workspace/nordic-wifi-shell-sqspi/build/merged.hex"
+          if [ ! -f "$HEX" ]; then
+            HEX="workspace/nordic-wifi-shell-sqspi/build/nordic-wifi-shell-sqspi/zephyr/zephyr.hex"
+          fi
+          cp "$HEX" artifacts/merged.hex
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
@@ -79,20 +107,36 @@ jobs:
           path: artifacts/
           retention-days: 30
 
-      - name: Create GitHub release and attach firmware
-        if: startsWith(github.ref, 'refs/tags/v')
+      # On every push to main: update the rolling "latest" release with fresh firmware.
+      # softprops/action-gh-release creates the tag+release if absent, updates it if present.
+      - name: Update rolling latest release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: latest
+          name: "Latest Build"
+          prerelease: false
+          make_latest: true
           files: artifacts/merged.hex
           body: |
-            ## nRF54LM20DK + nRF7002 EB-II (sQSPI) — ${{ github.ref_name }}
+            ## nRF54LM20DK + nRF7002 EB-II (sQSPI) — Latest pre-built firmware
 
-            Flash `merged.hex` with **nRF Connect for Desktop → Programmer** or:
+            Auto-updated on every push to `main`.
+            **Commit:** `${{ github.sha }}`
 
+            ### Flash instructions
+
+            1. Download `merged.hex`
+            2. Open **nRF Connect for Desktop → Programmer**, select the DK, add the `.hex`, click **Erase & Write**
+
+            Or via command line:
             ```sh
             west flash -d nordic-wifi-shell-sqspi/build --recover --dev-id <SERIAL>
             ```
 
-            See [README.md](README.md) for hardware modification and patching instructions.
+            ### Connect
+
+            Open **VCOM0** (115200 baud, hardware flow control ON).
+            See [README.md](README.md) for hardware modification and Wi-Fi connection instructions.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

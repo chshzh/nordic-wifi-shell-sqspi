@@ -8,6 +8,51 @@ A port of the NCS Wi-Fi Shell sample to the **nRF54LM20DK + hardware-modified nR
 
 This is a reference implementation demonstrating that the nRF7002 Wi-Fi radio can be driven over Quad SPI from an nRF54LM20DK, unlocking higher bus throughput (tested at 32 MHz) compared to the default single-bit SPI.
 
+- **Evaluator** — grab the pre-built `merged.hex` from the [Releases](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases) page and follow the [Quick Start](#evaluator-quick-start) below. No build environment needed.
+- **Developer** — clone, apply patches, build from source; see [Developer Info](#developer-info).
+
+---
+
+## Evaluator Quick Start
+
+> Pre-built path — no build environment needed. ~5 minutes.
+> **Requires the hardware modification** (cut SB1–4, solder SB5–8). See [Hardware Modification](#hardware-modification-spi--sqspi).
+
+### Step 1 — Flash the firmware
+
+Download `merged.hex` from the [Latest Release](https://github.com/chshzh/nordic-wifi-shell-sqspi/releases/latest), then open **nRF Connect for Desktop → Programmer**, select your nRF54LM20DK, add the `.hex` file, and click **Erase & Write**.
+
+Or flash via command line (requires a local NCS toolchain):
+
+```sh
+west flash -d nordic-wifi-shell-sqspi/build --recover --dev-id <SERIAL>
+```
+
+### Step 2 — Connect to the console
+
+Open a serial terminal on **VCOM0** (the first COM port enumerated by the DK) at **115200 baud with hardware flow control enabled** (RTS/CTS).
+
+> **Why VCOM0?** The nRF7002 EB-II expansion header occupies some Port 1 GPIO lines that
+> conflict with UART20 (the default console UART). UART30 (Port 0, P0.6/P0.7) is used
+> instead and maps to VCOM0. This is standard NCS behaviour — the unmodified `nrf7002eb2`
+> shield applies the same redirect.
+
+Recommended tools:
+- **nRF Connect for Desktop → Serial Terminal** — select VCOM0, 115200 baud, flow control ON
+- `python3 nordicsemi_uart_monitor.py --port /dev/cu.usbmodem... --baud 115200`
+
+You should see the Zephyr boot log followed by the shell prompt `uart:~$`.
+
+### Step 3 — Connect to Wi-Fi
+
+```sh
+uart:~$ wifi scan
+uart:~$ wifi connect -s <SSID> -k 1 -p <password>
+uart:~$ wifi status
+```
+
+`-k 1` selects WPA2-PSK. After a successful connect, `wifi status` shows the assigned IP address.
+
 ---
 
 ## Project Overview
