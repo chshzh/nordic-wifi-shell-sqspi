@@ -52,9 +52,12 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           west init -l nordic-wifi-shell-sqspi
-          # Full update (no --narrow) so all modules are cloned and zephyr's
-          # west build extension is registered. Shallow depth keeps it fast.
-          west update -o=--depth=1
+          # Try shallow first (fast). Some third-party repos (wfa-qt-control-app,
+          # qcbor, cmock, coremark) can't resolve specific SHAs with --depth=1
+          # because they don't advertise those commits on their tip refs.
+          # Fall back to full update so the cache is populated correctly on the
+          # first run; subsequent runs hit the cache and skip this step entirely.
+          west update -o=--depth=1 || west update
 
       # When restoring from cache the .west config is missing; re-run init (no-op if already there).
       - name: Restore west config after cache hit
