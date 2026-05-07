@@ -121,7 +121,7 @@ jobs:
           if [ ! -f "$HEX" ]; then
             HEX="workspace/nordic-wifi-shell-sqspi/build/zephyr/zephyr.hex"
           fi
-          cp "$HEX" artifacts/merged.hex
+          cp "$HEX" artifacts/nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
@@ -140,26 +140,17 @@ jobs:
           name: "Latest Build"
           prerelease: false
           make_latest: true
-          files: artifacts/merged.hex
+          files: artifacts/nordic-wifi-shell-sqspi-nrf54lm20dk-nrf7002ebii-ncs3.3.0.hex
           body: |
             ## nRF54LM20DK + nRF7002 EB-II (sQSPI) — Latest pre-built firmware
 
             Auto-updated on every push to `main`.
             **Commit:** `${{ github.sha }}`
 
-            ### Flash instructions
+            ---
 
-            1. Download `merged.hex`
-            2. Open **nRF Connect for Desktop → Programmer**, select the DK, add the `.hex`, click **Erase & Write**
+            For flashing and setup instructions, see the **[Evaluator Quick Start](https://github.com/chshzh/nordic-wifi-shell-sqspi#evaluator-quick-start)** in the README.
 
-            Or via command line:
-            ```sh
-            west flash -d nordic-wifi-shell-sqspi/build --recover --dev-id <SERIAL>
-            ```
-
-            ### Connect
-
-            Open **VCOM0** (115200 baud, hardware flow control ON).
-            See [README.md](README.md) for hardware modification and Wi-Fi connection instructions.
+            > Requires one hardware modification (solder bridges SB1–SB8) and Board Configurator setup (External Memory disabled, VDD_IO = 3.3 V).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

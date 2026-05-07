@@ -1,4 +1,4 @@
-From 51b21c4e97d8a3bb0a305daca7ab7beca5b99356 Mon Sep 17 00:00:00 2001
+From 0aaf9d38c937cda9cb41b19a9429918fd9e7bcc2 Mon Sep 17 00:00:00 2001
 From: Charlie Shao <charlie.shao@nordicsemi.no>
 Date: Thu, 7 May 2026 09:37:23 +0200
 Subject: [PATCH] [nrf noup] wifi: nrf70: add MSPI bus backend for sQSPI on
@@ -48,29 +48,6 @@ Tested on nRF54LM20DK + nRF7002 EB-II at 32 MHz:
 Assisted-by: Claude:claude-sonnet-4.6
 Signed-off-by: chsh <chsh@users.noreply.github.com>
 Signed-off-by: Charlie Shao <charlie.shao@nordicsemi.no>
----
- boards/shields/nrf7002eb2_mspi/Kconfig.shield |  11 +
- .../nrf54lm20dk_nrf54lm20a_cpuapp.overlay     | 119 +++++++
- .../nrf7002eb2_mspi/nrf7002eb2_mspi.overlay   |  94 +++++
- boards/shields/nrf7002eb2_mspi/shield.yml     |   6 +
- drivers/wifi/nrf_wifi/Kconfig.nrfwifi         |   7 +-
- dts/bindings/wifi/nordic,nrf70-mspi.yaml      |  12 +
- dts/bindings/wifi/nordic,nrf7002-mspi.yaml    |  11 +
- modules/nrf_wifi/bus/CMakeLists.txt           |   4 +
- modules/nrf_wifi/bus/Kconfig                  |   6 +
- modules/nrf_wifi/bus/device.c                 |   9 +
- modules/nrf_wifi/bus/mspi_if.c                | 336 ++++++++++++++++++
- modules/nrf_wifi/bus/mspi_if.h                |  37 ++
- modules/nrf_wifi/bus/rpu_hw_if.c              |  13 +
- 13 files changed, 663 insertions(+), 2 deletions(-)
- create mode 100644 boards/shields/nrf7002eb2_mspi/Kconfig.shield
- create mode 100644 boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
- create mode 100644 boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay
- create mode 100644 boards/shields/nrf7002eb2_mspi/shield.yml
- create mode 100644 dts/bindings/wifi/nordic,nrf70-mspi.yaml
- create mode 100644 dts/bindings/wifi/nordic,nrf7002-mspi.yaml
- create mode 100644 modules/nrf_wifi/bus/mspi_if.c
- create mode 100644 modules/nrf_wifi/bus/mspi_if.h
 
 diff --git a/boards/shields/nrf7002eb2_mspi/Kconfig.shield b/boards/shields/nrf7002eb2_mspi/Kconfig.shield
 new file mode 100644
@@ -91,10 +68,10 @@ index 00000000000..96910acfe05
 +	  Supported board: nRF54LM20DK.
 diff --git a/boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay b/boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
 new file mode 100644
-index 00000000000..5329ea33058
+index 00000000000..adf961d6619
 --- /dev/null
 +++ b/boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,78 @@
 +/*
 + * Copyright (c) 2026 Nordic Semiconductor ASA
 + *
@@ -105,7 +82,9 @@ index 00000000000..5329ea33058
 + * This overlay:
 + *   1. Reduces cpuapp_sram to 496 KB to leave 16 KB at 0x2007c000 for sQSPI.
 + *   2. Configures cpuflpr_vpr pinctrl and IRQ for the sQSPI soft peripheral.
-+ *   3. Redirects console from UART20 (conflicts with EB-II) to UART30.
++ *
++ * Console: UART20 (VCOM1, P1.16/P1.17) — the nRF54LM20DK default. No redirect needed;
++ * UART20 pins are not used by the nRF7002 EB-II expansion header.
 + *
 + * sQSPI pin mapping (Port 2, SDP pins via solder bridges SB5-SB8):
 + *   P2.0 = DQ3 (expansion header pin 16)
@@ -154,31 +133,6 @@ index 00000000000..5329ea33058
 +		};
 +	};
 +
-+	/* Override uart30 pinctrl: TX/RX only, no RTS/CTS.
-+	 * The debug IC gates VCOM RX if RTS is not asserted;
-+	 * removing RTS/CTS from pinctrl avoids that issue.
-+	 */
-+	uart30_default: uart30_default {
-+		group1 {
-+			psels = <NRF_PSEL(UART_TX, 0, 6)>,
-+				<NRF_PSEL(UART_RTS, 0, 8)>;
-+		};
-+		group2 {
-+			psels = <NRF_PSEL(UART_RX, 0, 7)>,
-+				<NRF_PSEL(UART_CTS, 0, 9)>;
-+			bias-pull-up;
-+		};
-+	};
-+
-+	uart30_sleep: uart30_sleep {
-+		group1 {
-+			psels = <NRF_PSEL(UART_TX, 0, 6)>,
-+				<NRF_PSEL(UART_RTS, 0, 8)>,
-+				<NRF_PSEL(UART_RX, 0, 7)>,
-+				<NRF_PSEL(UART_CTS, 0, 9)>;
-+			low-power-enable;
-+		};
-+	};
 +};
 +
 +/*
@@ -195,25 +149,7 @@ index 00000000000..5329ea33058
 +	status = "okay";
 +};
 +
-+/* UART20 conflicts with EB-II expansion header signals; switch console to UART30 */
-+/ {
-+	chosen {
-+		zephyr,console    = &uart30;
-+		zephyr,shell-uart = &uart30;
-+		zephyr,uart-mcumgr = &uart30;
-+		zephyr,bt-mon-uart = &uart30;
-+		zephyr,bt-c2h-uart = &uart30;
-+	};
-+};
-+
-+&uart20 {
-+	status = "disabled";
-+};
-+
-+&uart30 {
-+	status = "okay";
-+	hw-flow-control;
-+};
++/* Console: UART20 (VCOM1, P1.16/P1.17) is the nRF54LM20DK default — no redirect needed. */
 diff --git a/boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay b/boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay
 new file mode 100644
 index 00000000000..c4095cf6b19
