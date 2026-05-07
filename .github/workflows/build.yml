@@ -170,7 +170,21 @@ jobs:
       - name: Remove stale merged.hex from release
         if: github.ref == 'refs/heads/main'
         run: |
-          gh release delete-asset latest merged.hex --yes 2>/dev/null || true
+          # gh CLI is not in the NCS toolchain container — use the GitHub REST API directly.
+          RELEASE=$(curl -sf -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/latest")
+          ASSET_ID=$(echo "$RELEASE" | python3 -c "
+import sys, json
+assets = json.load(sys.stdin).get('assets', [])
+ids = [a['id'] for a in assets if a['name'] == 'merged.hex']
+print(ids[0] if ids else '')
+")
+          if [ -n "$ASSET_ID" ]; then
+            curl -sf -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
+            echo "Deleted stale merged.hex (asset id $ASSET_ID)"
+          else
+            echo "merged.hex not present in release — nothing to delete"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
