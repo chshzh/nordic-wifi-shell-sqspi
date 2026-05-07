@@ -52,12 +52,14 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           west init -l nordic-wifi-shell-sqspi
-          # Skip ci-skip group (wfa-qt-control-app, qcbor, cmock, coremark —
-          # external repos that fail shallow SHA fetches and are not needed for
-          # wifi-shell) and benchmark group (coremark). Use shallow clones for
-          # speed; the cache key captures west.yml+patches so stale cache is
-          # automatically invalidated on any manifest or patch change.
-          west update -o=--depth=1 --group-filter -ci-skip,-benchmark
+          # --group-filter takes one argument per flag; the leading '-' means
+          # "disable this group". Use '--' to stop option parsing before the
+          # filter value so the shell doesn't interpret '-ci-skip' as a flag.
+          # Skip ci-skip (wfa-qt, qcbor, cmock) and benchmark (coremark):
+          # these external repos fail SHA fetches in CI and are not needed.
+          west update -o=--depth=1 \
+            --group-filter -ci-skip \
+            --group-filter -benchmark
 
       # When restoring from cache the .west config is missing; re-run init (no-op if already there).
       - name: Restore west config after cache hit
