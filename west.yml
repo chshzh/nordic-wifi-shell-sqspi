@@ -1,32 +1,22 @@
 manifest:
   version: "0.10"
 
-  # Use sdk-nrf as the manifest source; import pulls in all NCS dependencies
-  # (zephyr, nrfxlib, modules, bootloader, etc.).
+  # Use sdk-nrf as the manifest source; import: true pulls in all NCS
+  # dependencies transitively (zephyr with west-commands + west.yml import for
+  # hal_nordic etc., nrfxlib, modules, bootloader…).
   #
-  # zephyr and nrfxlib are listed explicitly so CI can apply our patches to them.
-  # west-commands is required so 'west build' extension command is registered.
+  # DO NOT explicitly list zephyr or nrfxlib here — doing so overrides the entry
+  # from nrf's transitive import and loses zephyr's own import: allowlist, which
+  # is what registers 'west build' and fetches hal_nordic and other modules.
   #
   # wfa-qt-control-app, qcbor, cmock, coremark are external repos that fail to
-  # fetch specific commit SHAs in CI (network/shallow-fetch issues). They are not
-  # needed for the wifi-shell build. We assign them to the 'ci-skip' group and
-  # disable that group in CI via --group-filter.
+  # fetch specific commit SHAs in CI. They are not needed for the wifi-shell
+  # build. We assign them to the 'ci-skip' group and disable it via west config.
   projects:
     - name: nrf
       url: https://github.com/nrfconnect/sdk-nrf
       revision: v3.3.0
       import: true
-
-    - name: zephyr
-      url: https://github.com/nrfconnect/sdk-zephyr
-      revision: ncs-v3.3.0
-      path: zephyr
-      west-commands: scripts/west-commands.yml
-
-    - name: nrfxlib
-      url: https://github.com/nrfconnect/sdk-nrfxlib
-      revision: v3.3.0
-      path: nrfxlib
 
     - name: wfa-qt-control-app
       url: https://github.com/nrfconnect/sdk-wi-fiquicktrack-controlappc
