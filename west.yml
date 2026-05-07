@@ -4,9 +4,9 @@ manifest:
   # Use sdk-nrf as the manifest source; import pulls in all NCS dependencies
   # (zephyr, nrfxlib, modules, bootloader, etc.).
   #
-  # zephyr and nrfxlib are listed explicitly here so that 'west update --narrow'
-  # clones them — they are needed for our custom patches. Without explicit listing,
-  # --narrow only clones 'nrf' and skips the transitive imports.
+  # zephyr and nrfxlib are listed explicitly here so CI can patch them
+  # after a full 'west update'. west-commands is required for west to
+  # register the 'west build' extension from zephyr.
   projects:
     - name: nrf
       url: https://github.com/nrfconnect/sdk-nrf
@@ -17,6 +17,7 @@ manifest:
       url: https://github.com/nrfconnect/sdk-zephyr
       revision: ncs-v3.3.0
       path: zephyr
+      west-commands: scripts/west-commands.yml
 
     - name: nrfxlib
       url: https://github.com/nrfconnect/sdk-nrfxlib

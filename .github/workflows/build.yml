@@ -52,7 +52,9 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           west init -l nordic-wifi-shell-sqspi
-          west update --narrow --fetch-opt=--depth=1 -n
+          # Full update (no --narrow) so all modules are cloned and zephyr's
+          # west build extension is registered. Shallow depth keeps it fast.
+          west update -o=--depth=1
 
       # When restoring from cache the .west config is missing; re-run init (no-op if already there).
       - name: Restore west config after cache hit
