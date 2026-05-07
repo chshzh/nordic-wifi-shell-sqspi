@@ -85,9 +85,21 @@ jobs:
               echo "Patch applied to $repo"
             else
               git -C "$repo" am --abort 2>/dev/null || true
+              # Extract subject: unfold RFC 2822 multi-line Subject, strip [PATCH*] and [nrf *] tags.
+              # A wrapped Subject has continuation lines starting with whitespace.
               local subject
-              subject=$(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$patch" | head -1)
-              if git -C "$repo" log --oneline | grep -qF "$subject"; then
+              subject=$(awk '
+                /^Subject:/ {
+                  sub(/^Subject: /, "")
+                  sub(/^\[PATCH[^]]*\] /, "")
+                  sub(/^\[nrf [^]]*\] /, "")
+                  line = $0
+                  while ((getline cont) > 0 && cont ~ /^ /) { line = line cont }
+                  print line
+                  exit
+                }
+              ' "$patch")
+              if [ -n "$subject" ] && git -C "$repo" log --oneline | grep -qF "$subject"; then
                 echo "Patch already applied to $repo — skipping"
               else
                 echo "ERROR: patch failed for $repo and is not already applied"
