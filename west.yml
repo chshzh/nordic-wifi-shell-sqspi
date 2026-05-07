@@ -1,5 +1,5 @@
 manifest:
-  version: 0.10
+  version: "0.10"
 
   # Use sdk-nrf as the manifest source; import pulls in all NCS dependencies
   # (zephyr, nrfxlib, modules, bootloader, etc.).
