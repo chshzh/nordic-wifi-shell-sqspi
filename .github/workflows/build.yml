@@ -21,6 +21,10 @@ jobs:
     # Use the pre-built NCS v3.3.0 toolchain container — no nrfutil download needed.
     container:
       image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.0
+    # The container sets up west/cmake/ninja in PATH for bash sessions only.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout app
