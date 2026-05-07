@@ -39,7 +39,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            workspace/.west
             workspace/nrf
             workspace/zephyr
             workspace/modules
@@ -60,17 +59,18 @@ jobs:
           west config manifest.group-filter -- -ci-skip,-benchmark
           west update -o=--depth=1 -n
 
-      # When restoring from cache the .west config is included; no re-init needed.
-      # Step kept as a no-op guard in case the cache is partial/corrupt.
+      # When restoring from cache, repos are present but .west/ is absent.
+      # Re-run west init -l and west update --fetch=smart:
+      # --fetch=smart skips git fetches when repos are already at the required revision,
+      # making this step fast (~seconds) while properly registering west extension commands.
       - name: Restore west config after cache hit
         if: steps.cache-ncs.outputs.cache-hit == 'true'
         working-directory: workspace
         run: |
           git config --global --add safe.directory '*'
-          # Only init if [zephyr] base is missing (e.g. partial cache).
-          # Full re-init would overwrite .west/config and lose the zephyr base entry.
-          grep -q 'base = zephyr' .west/config 2>/dev/null || \
-            west init -l nordic-wifi-shell-sqspi 2>/dev/null || true
+          west init -l nordic-wifi-shell-sqspi 2>/dev/null || true
+          west config manifest.group-filter -- -ci-skip,-benchmark
+          west update --fetch=smart
 
       # Apply patches to nrfxlib, nrf, and zephyr on top of their v3.3.0 tags.
       # Skips gracefully if a patch is already applied (cache hit scenario).
