@@ -57,7 +57,7 @@ jobs:
           # Use west config instead of --group-filter flag: values starting with '-'
           # are misinterpreted by argparse as new flags even with separate invocations.
           west config manifest.group-filter -- -ci-skip,-benchmark
-          west update -o=--depth=1
+          west update -o=--depth=1 -n
 
       # When restoring from cache the .west config is missing; re-run init (no-op if already there).
       - name: Restore west config after cache hit
