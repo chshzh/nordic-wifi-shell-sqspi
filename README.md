@@ -174,6 +174,7 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 | `nrfxlib` | `0001-nrf-noup-softperipheral-sqspi-harden-VPR-barrier-syn.patch` | `__DSB()` before trigger, graduated re-trigger at 100 K / 500 K / 2 M spins, 10 M spin timeout |
 | `nrf` | `0001-nrf-noup-drivers-mspi-sqspi-add-retry-and-DMA-abort-.patch` | MSPI driver: up to 2× retry on barrier/DMA timeout; calls `nrf_sqspi_abort()` on failure |
 | `zephyr` | `0001-nrf-noup-wifi-nrf70-add-MSPI-bus-backend-for-sQSPI-o.patch` | MSPI bus backend for nRF70 Wi-Fi, DTS bindings, `nrf7002eb2_mspi` shield definition |
+| `zephyr` | `0002-zephyr-noup-modules-nrf_wifi-bus-mspi_if-fix-hl_read.patch` | Fix `hl_read` for per-word addressed reads |
 
 ### Key design decisions
 
@@ -184,6 +185,19 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 **Memory reservation** — The top 16 KB of app-core SRAM is reserved for the sQSPI soft peripheral register file and DMA buffers. `cpuapp_sram` is reduced to 496 KB in the board overlay.
 
 **VDD_IO 3.3 V requirement** — At 32 MHz the SPI half-clock period is ~15.6 ns, leaving little margin for signal edges to settle across the connector. The 3.3 V swing provides the drive current needed to charge connector parasitic capacitance within this budget; 1.8 V (the DK default) is insufficient at this speed. The `NRF_DRIVE_E0E1` extra drive mode in pinctrl complements this.
+
+---
+
+## Performance Results
+
+Measured on NCS v3.3.0 with `overlay-zperf.conf` + `overlay-high-performance.conf`, 5 GHz (802.11ac), 3 runs × 5 s UDP zperf. Mac iperf endpoint at 192.168.75.216.
+
+| Device | Bus | Clock | TX (Mbps) | RX (Mbps) |
+|--------|-----|-------|-----------|----------|
+| nRF54LM20DK + nRF7002 EB-II | sQSPI (FLPR VPR) | 32 MHz | 10.79 / 10.96 / 10.81 | 10.11 / 10.32 / 9.97 |
+| nRF7002DK (nRF5340) | QSPI | 32 MHz | 15.63 / 15.70 / 15.60 | 13.82 / 13.67 / 13.68 |
+
+> The sQSPI path adds ~2–3 Mbps overhead vs native QSPI, reflecting the FLPR VPR handshake and DMA round-trip cost. Both targets achieve ≫ the SPI@8MHz baseline of ~4–5 Mbps.
 
 ---
 
