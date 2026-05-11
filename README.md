@@ -120,7 +120,7 @@ west update
 
 ### Patching nrf, nrfxlib, and zephyr
 
-Three patches must be applied to upstream NCS repos after `west update`. Apply them from the **NCS workspace root**:
+Four patches must be applied to upstream NCS repos after `west update`. Apply them from the **NCS workspace root**:
 
 ```sh
 # nrfxlib — VPR barrier hardening and nrf_sqspi_abort()
@@ -133,7 +133,7 @@ git -C nrf am nordic-wifi-shell-sqspi/patches/nrf/*.patch
 git -C zephyr am nordic-wifi-shell-sqspi/patches/zephyr/*.patch
 ```
 
-Each command applies a single commit on top of the v3.3.0 tag. If a patch is already applied (e.g., rebuilding after a cache hit), `git am` will fail; run `git -C <repo> am --abort` to reset, then confirm with `git -C <repo> log --oneline`.
+Each glob applies all patches in the directory in order. If a patch is already applied (e.g., rebuilding after a cache hit), `git am` will fail; run `git -C <repo> am --abort` to reset, then confirm with `git -C <repo> log --oneline`.
 
 ### Build
 
@@ -165,6 +165,41 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 
 ---
 
+## Throughput Test Results
+
+> Full test details: [WCS-121](https://nordicsemi.atlassian.net/browse/WCS-121)
+
+**NCS v3.3.0 — BE92U_5G (5 GHz) — UDP — 3 runs — May 2026**
+
+| Device | UDP TX avg (Mbps) | UDP RX avg (Mbps) |
+|--------|-------------------|-------------------|
+| nRF7002DK QSPI@32MHz | **16.02** | **13.94** |
+| nRF54LM20DK **(HW v0.7.0)** sQSPI@32MHz | **10.20** | **10.20** |
+| nRF54LM20DK **(HW v0.3.4)** sQSPI@32MHz | 0.43 | 0.77 |
+| nRF54LM20DK SPI@8MHz | 4.72 | 4.31 |
+
+### Conclusion
+
+**HW v0.7.0 at sQSPI@32MHz reaches ~64% of the nRF7002DK QSPI@32MHz throughput** — a 2.2× improvement over SPI@8MHz and within the same PHY-limited regime as the native QSPI platform. The result confirms sQSPI is bus-capable for real Wi-Fi workloads on v0.7.0 hardware.
+
+**HW v0.3.4 is unsuitable for 32 MHz sQSPI.** The 24× throughput drop (0.43 vs 10.20 Mbps TX) on identical firmware confirms the root cause is signal integrity at the expansion connector, not a software bug. The `cmd=0xeb` DMA transfer timeouts seen on v0.3.4 are a direct consequence of degraded QSPI signal edges; the driver retry/abort recovery in WCS-120 cannot compensate for fundamentally bad signals.
+
+### Why sQSPI@32MHz Is Slower Than Native QSPI@32MHz
+
+Despite identical clock frequency and 4-wire bus, sQSPI on HW v0.7.0 delivers ~64% of the native QSPI throughput. The gap has several contributing causes:
+
+1. **Software co-processor overhead (FLPR VPR).** The nRF7002DK's dedicated QSPI hardware peripheral handles each transfer entirely in silicon. On the nRF54LM20DK, every transfer is orchestrated by VPR firmware running on the FLPR core: the app core writes a descriptor, triggers the VPR via a `TASKS_TRIGGER` event, then spins waiting for an acknowledge flag. This software handshake loop adds latency that a hardware peripheral does not have.
+
+2. **VPR barrier synchronization idle cycles.** The `__DSB()` fence before the first trigger and the graduated re-trigger at 100 K / 500 K / 2 M spin iterations are necessary to prevent missed triggers but they insert non-transfer time between back-to-back operations. A native QSPI peripheral has no equivalent stall.
+
+3. **DMA setup cost per transfer.** The VPR configures a new DMA descriptor for each transfer (source address, length, direction). A hardware QSPI controller pipelines this with the previous transfer.
+
+4. **Cross-core memory visibility latency.** The DMA buffers sit in the top 16 KB of app-core SRAM. Writes by the app core must propagate through the shared memory bus and become visible to the VPR DMA engine. The `__DSB()` enforces ordering but does not eliminate the bus-crossing latency.
+
+5. **Expansion connector parasitics.** On the nRF7002DK the nRF7002 is wired directly to the nRF5340's QSPI peripheral via short PCB traces. On the nRF54LM20DK + EB2 the signal path crosses a mezzanine connector with higher capacitance. Even at 3.3 V/`E0E1` drive strength, this slightly degrades setup and hold margins and forces the VPR to allow additional settle time.
+
+---
+
 ## Design Notes
 
 ### Patches applied
@@ -185,19 +220,6 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 **Memory reservation** — The top 16 KB of app-core SRAM is reserved for the sQSPI soft peripheral register file and DMA buffers. `cpuapp_sram` is reduced to 496 KB in the board overlay.
 
 **VDD_IO 3.3 V requirement** — At 32 MHz the SPI half-clock period is ~15.6 ns, leaving little margin for signal edges to settle across the connector. The 3.3 V swing provides the drive current needed to charge connector parasitic capacitance within this budget; 1.8 V (the DK default) is insufficient at this speed. The `NRF_DRIVE_E0E1` extra drive mode in pinctrl complements this.
-
----
-
-## Performance Results
-
-Measured on NCS v3.3.0 with `overlay-zperf.conf` + `overlay-high-performance.conf`, 5 GHz (802.11ac), 3 runs × 5 s UDP zperf. Mac iperf endpoint at 192.168.75.216.
-
-| Device | Bus | Clock | TX (Mbps) | RX (Mbps) |
-|--------|-----|-------|-----------|----------|
-| nRF54LM20DK + nRF7002 EB-II | sQSPI (FLPR VPR) | 32 MHz | 10.79 / 10.96 / 10.81 | 10.11 / 10.32 / 9.97 |
-| nRF7002DK (nRF5340) | QSPI | 32 MHz | 15.63 / 15.70 / 15.60 | 13.82 / 13.67 / 13.68 |
-
-> The sQSPI path adds ~2–3 Mbps overhead vs native QSPI, reflecting the FLPR VPR handshake and DMA round-trip cost. Both targets achieve ≫ the SPI@8MHz baseline of ~4–5 Mbps.
 
 ---
 
