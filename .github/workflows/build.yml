@@ -117,6 +117,7 @@ jobs:
           apply_patch nrfxlib "$PATCHES/nrfxlib/"0001-*.patch
           apply_patch nrf     "$PATCHES/nrf/"0001-*.patch
           apply_patch zephyr  "$PATCHES/zephyr/"0001-*.patch
+          apply_patch zephyr  "$PATCHES/zephyr/"0002-*.patch
 
       - name: Build
         working-directory: workspace/nordic-wifi-shell-sqspi
