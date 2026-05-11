@@ -48,6 +48,29 @@ Tested on nRF54LM20DK + nRF7002 EB-II at 32 MHz:
 Assisted-by: Claude:claude-sonnet-4.6
 Signed-off-by: chsh <chsh@users.noreply.github.com>
 Signed-off-by: Charlie Shao <charlie.shao@nordicsemi.no>
+---
+ boards/shields/nrf7002eb2_mspi/Kconfig.shield |  11 +
+ .../nrf54lm20dk_nrf54lm20a_cpuapp.overlay     |  78 ++++
+ .../nrf7002eb2_mspi/nrf7002eb2_mspi.overlay   |  94 +++++
+ boards/shields/nrf7002eb2_mspi/shield.yml     |   6 +
+ drivers/wifi/nrf_wifi/Kconfig.nrfwifi         |   7 +-
+ dts/bindings/wifi/nordic,nrf70-mspi.yaml      |  12 +
+ dts/bindings/wifi/nordic,nrf7002-mspi.yaml    |  11 +
+ modules/nrf_wifi/bus/CMakeLists.txt           |   4 +
+ modules/nrf_wifi/bus/Kconfig                  |   6 +
+ modules/nrf_wifi/bus/device.c                 |   9 +
+ modules/nrf_wifi/bus/mspi_if.c                | 336 ++++++++++++++++++
+ modules/nrf_wifi/bus/mspi_if.h                |  37 ++
+ modules/nrf_wifi/bus/rpu_hw_if.c              |  13 +
+ 13 files changed, 622 insertions(+), 2 deletions(-)
+ create mode 100644 boards/shields/nrf7002eb2_mspi/Kconfig.shield
+ create mode 100644 boards/shields/nrf7002eb2_mspi/boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay
+ create mode 100644 boards/shields/nrf7002eb2_mspi/nrf7002eb2_mspi.overlay
+ create mode 100644 boards/shields/nrf7002eb2_mspi/shield.yml
+ create mode 100644 dts/bindings/wifi/nordic,nrf70-mspi.yaml
+ create mode 100644 dts/bindings/wifi/nordic,nrf7002-mspi.yaml
+ create mode 100644 modules/nrf_wifi/bus/mspi_if.c
+ create mode 100644 modules/nrf_wifi/bus/mspi_if.h
 
 diff --git a/boards/shields/nrf7002eb2_mspi/Kconfig.shield b/boards/shields/nrf7002eb2_mspi/Kconfig.shield
 new file mode 100644

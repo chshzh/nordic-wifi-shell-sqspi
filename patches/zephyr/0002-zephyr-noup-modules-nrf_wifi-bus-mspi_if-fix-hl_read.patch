@@ -1,0 +1,191 @@
+From 1da591ad4c8c2f98dc89d7a53cd11667f1c54779 Mon Sep 17 00:00:00 2001
+From: Charlie Shao <charlie.shao@nordicsemi.no>
+Date: Mon, 11 May 2026 11:24:22 +0200
+Subject: [PATCH] [zephyr noup] modules: nrf_wifi: bus: mspi_if: fix hl_read
+ for per-word addressed reads
+
+The nRF7002 HL memory region requires a fresh addressed command for every
+4-byte word -- a single burst transfer returns garbage from the RPU memory
+controller. Restructure mspi_hl_read() to issue one 4-byte mspi_xfer_rx()
+call per word, matching qspi_if.c and spi_if.c behavior.
+---
+ modules/nrf_wifi/bus/mspi_if.c | 79 +++++++++++++++++-----------------
+ 1 file changed, 39 insertions(+), 40 deletions(-)
+
+diff --git a/modules/nrf_wifi/bus/mspi_if.c b/modules/nrf_wifi/bus/mspi_if.c
+index 20a0da2668d..a4b55be2c42 100644
+--- a/modules/nrf_wifi/bus/mspi_if.c
++++ b/modules/nrf_wifi/bus/mspi_if.c
+@@ -40,7 +40,7 @@ static int mspi_config_apply(enum mspi_io_mode io_mode, uint32_t frequency)
+ {
+ 	const struct mspi_dev_cfg cfg = {
+ 		.io_mode = io_mode,
+-		.freq    = frequency,
++		.freq = frequency,
+ 	};
+ 	const enum mspi_dev_cfg_mask mask =
+ 		MSPI_DEVICE_CONFIG_IO_MODE | MSPI_DEVICE_CONFIG_FREQUENCY;
+@@ -56,20 +56,20 @@ static int mspi_config_apply(enum mspi_io_mode io_mode, uint32_t frequency)
+ static int mspi_xfer_tx(unsigned int addr, void *data, unsigned int len)
+ {
+ 	struct mspi_xfer_packet packet = {
+-		.dir      = MSPI_TX,
+-		.cmd      = 0x38, /* PP4IO opcode — quad write */
+-		.address  = addr,
++		.dir = MSPI_TX,
++		.cmd = 0x38, /* PP4IO opcode — quad write */
++		.address = addr,
+ 		.num_bytes = len,
+ 		.data_buf = data,
+ 	};
+ 	struct mspi_xfer xfer = {
+-		.xfer_mode  = MSPI_PIO,
+-		.tx_dummy   = 0,
+-		.cmd_length  = 1,
++		.xfer_mode = MSPI_PIO,
++		.tx_dummy = 0,
++		.cmd_length = 1,
+ 		.addr_length = 3,
+-		.packets    = &packet,
++		.packets = &packet,
+ 		.num_packet = 1,
+-		.timeout    = 1000,
++		.timeout = 1000,
+ 	};
+ 	int rc;
+ 
+@@ -85,26 +85,25 @@ static int mspi_xfer_tx(unsigned int addr, void *data, unsigned int len)
+ 	return rc;
+ }
+ 
+-static int mspi_xfer_rx(unsigned int addr, void *data, unsigned int len,
+-			bool extra_rx_latency)
++static int mspi_xfer_rx(unsigned int addr, void *data, unsigned int len, bool extra_rx_latency)
+ {
+ 	struct mspi_xfer_packet packet = {
+-		.dir      = MSPI_RX,
+-		.cmd      = 0xEB, /* READ4IO opcode — quad read */
++		.dir = MSPI_RX,
++		.cmd = 0xEB, /* READ4IO opcode — quad read */
+ 		/* Address shifted left 8 bits: 3B address + 1B mode byte in addr field */
+-		.address  = addr << 8,
++		.address = addr << 8,
+ 		.num_bytes = len,
+ 		.data_buf = data,
+ 	};
+ 	struct mspi_xfer xfer = {
+-		.xfer_mode  = MSPI_PIO,
+-		.tx_dummy   = 0,
+-		.rx_dummy   = 8,   /* base dummy cycles */
+-		.cmd_length  = 1,
+-		.addr_length = 4,  /* 3B addr + 1B mode = 4 bytes */
+-		.packets    = &packet,
++		.xfer_mode = MSPI_PIO,
++		.tx_dummy = 0,
++		.rx_dummy = 8, /* base dummy cycles */
++		.cmd_length = 1,
++		.addr_length = 4, /* 3B addr + 1B mode = 4 bytes */
++		.packets = &packet,
+ 		.num_packet = 1,
+-		.timeout    = 1000,
++		.timeout = 1000,
+ 	};
+ 	int rc;
+ 
+@@ -113,20 +112,20 @@ static int mspi_xfer_rx(unsigned int addr, void *data, unsigned int len,
+ 		xfer.rx_dummy += 8;
+ 	}
+ 
+-	LOG_DBG("RX addr=0x%06x len=%d extra_lat=%d rx_dummy=%d",
+-		addr, len, extra_rx_latency, xfer.rx_dummy);
++	LOG_DBG("RX addr=0x%06x len=%d extra_lat=%d rx_dummy=%d", addr, len, extra_rx_latency,
++		xfer.rx_dummy);
+ 
+-	/* Switch to quad mode at full frequency for bulk read */
+ 	rc = mspi_config_apply(mspi_cfg.io_mode, mspi_cfg.freq);
+ 	if (rc < 0) {
+ 		return rc;
+ 	}
++
+ 	rc = mspi_transceive(bus, &mspi_id, &xfer);
+ 	if (rc < 0) {
+ 		LOG_ERR("transceive() RX failed: %d", rc);
+ 	} else {
+-		LOG_DBG("RX result 0x%06x -> 0x%08x (rc=%d)",
+-			addr, len >= 4 ? *(uint32_t *)data : 0, rc);
++		LOG_DBG("RX result 0x%06x -> 0x%08x (rc=%d)", addr,
++			len >= 4 ? *(uint32_t *)data : 0, rc);
+ 	}
+ 	return rc;
+ }
+@@ -141,18 +140,18 @@ static int mspi_xfer_rx(unsigned int addr, void *data, unsigned int len,
+ static int mspi_reg_write(uint8_t reg, uint8_t val, uint32_t frequency)
+ {
+ 	struct mspi_xfer_packet packet = {
+-		.dir      = MSPI_TX,
+-		.cmd      = reg,
++		.dir = MSPI_TX,
++		.cmd = reg,
+ 		.num_bytes = sizeof(val),
+ 		.data_buf = &val,
+ 	};
+ 	struct mspi_xfer xfer = {
+-		.xfer_mode  = MSPI_PIO,
+-		.cmd_length  = 1,
++		.xfer_mode = MSPI_PIO,
++		.cmd_length = 1,
+ 		.addr_length = 0,
+-		.packets    = &packet,
++		.packets = &packet,
+ 		.num_packet = 1,
+-		.timeout    = 1000,
++		.timeout = 1000,
+ 	};
+ 	int rc;
+ 
+@@ -171,18 +170,18 @@ static int mspi_reg_write(uint8_t reg, uint8_t val, uint32_t frequency)
+ static int mspi_reg_read(uint8_t reg, uint8_t *val)
+ {
+ 	struct mspi_xfer_packet packet = {
+-		.dir      = MSPI_RX,
+-		.cmd      = reg,
++		.dir = MSPI_RX,
++		.cmd = reg,
+ 		.num_bytes = sizeof(*val),
+ 		.data_buf = val,
+ 	};
+ 	struct mspi_xfer xfer = {
+-		.xfer_mode  = MSPI_PIO,
+-		.cmd_length  = 1,
++		.xfer_mode = MSPI_PIO,
++		.cmd_length = 1,
+ 		.addr_length = 0,
+-		.packets    = &packet,
++		.packets = &packet,
+ 		.num_packet = 1,
+-		.timeout    = 1000,
++		.timeout = 1000,
+ 	};
+ 	int rc;
+ 
+@@ -253,7 +252,6 @@ static int mspi_hl_readw(unsigned int addr, void *data)
+ 	int status;
+ 
+ 	k_sem_take(&config->lock, K_FOREVER);
+-	/* Extra latency for frequencies >= 16 MHz (matches qspi_if / spi_if behavior) */
+ 	status = mspi_xfer_rx(addr, data, 4, mspi_cfg.freq >= MHZ(16));
+ 	k_sem_give(&config->lock);
+ 	return status;
+@@ -293,7 +291,8 @@ int mspi_validate_rpu_wake_writecmd(void)
+ 	}
+ 
+ 	if (ret || !(val & RPU_WAKEUP_NOW)) {
+-		LOG_ERR("RPU wakeup write ACK failed even after 10ms (val=0x%02x ret=%d)", val, ret);
++		LOG_ERR("RPU wakeup write ACK failed even after 10ms (val=0x%02x ret=%d)", val,
++			ret);
+ 		return -1;
+ 	}
+ 	return ret;
+-- 
+2.50.1 (Apple Git-155)
+

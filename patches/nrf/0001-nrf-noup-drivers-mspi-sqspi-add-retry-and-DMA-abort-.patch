@@ -1,4 +1,4 @@
-From 24862d33a177c0968c736b3c8160f4011dda5eae Mon Sep 17 00:00:00 2001
+From 37fa4e0c3419fe8d68f20203f9e8d30420a30d7a Mon Sep 17 00:00:00 2001
 From: Charlie Shao <charlie.shao@nordicsemi.no>
 Date: Thu, 7 May 2026 09:37:01 +0200
 Subject: [PATCH] [nrf noup] drivers: mspi: sqspi: add retry and DMA abort
@@ -30,11 +30,11 @@ Assisted-by: Claude:claude-sonnet-4.6
 Signed-off-by: chsh <chsh@users.noreply.github.com>
 Signed-off-by: Charlie Shao <charlie.shao@nordicsemi.no>
 ---
- drivers/mspi/mspi_sqspi.c | 188 ++++++++++++++++++--------------------
- 1 file changed, 90 insertions(+), 98 deletions(-)
+ drivers/mspi/mspi_sqspi.c | 236 +++++++++++++++++++-------------------
+ 1 file changed, 116 insertions(+), 120 deletions(-)
 
 diff --git a/drivers/mspi/mspi_sqspi.c b/drivers/mspi/mspi_sqspi.c
-index c93313d1c6..47c9ad26d2 100644
+index c93313d1c6..fe6ca08673 100644
 --- a/drivers/mspi/mspi_sqspi.c
 +++ b/drivers/mspi/mspi_sqspi.c
 @@ -46,8 +46,7 @@ struct mspi_sqspi_config {
@@ -84,7 +84,7 @@ index c93313d1c6..47c9ad26d2 100644
  {
  	struct mspi_sqspi_data *dev_data = dev->data;
  	int rc;
-@@ -237,14 +232,18 @@ static int api_get_channel_status(const struct device *dev, uint8_t ch)
+@@ -237,8 +232,7 @@ static int api_get_channel_status(const struct device *dev, uint8_t ch)
  	return 0;
  }
  
@@ -94,54 +94,93 @@ index c93313d1c6..47c9ad26d2 100644
  			k_timeout_t timeout)
  {
  	const struct mspi_sqspi_config *dev_config = dev->config;
- 	struct mspi_sqspi_data *dev_data = dev->data;
+@@ -246,53 +240,77 @@ static int perform_xfer(const struct device *dev,
  	int rc = 0;
  	nrfx_err_t err;
-+	int retries = 2;
-+
-+retry:
-+	/* Allow VPR to finish post-transfer processing from previous xfer */
-+	k_busy_wait(200);
  
- 	if (dev_data->dev_id->ce.port) {
- 		rc = gpio_pin_set_dt(&dev_data->dev_id->ce, 1);
-@@ -256,13 +255,33 @@ static int perform_xfer(const struct device *dev,
+-	if (dev_data->dev_id->ce.port) {
+-		rc = gpio_pin_set_dt(&dev_data->dev_id->ce, 1);
+-		if (rc < 0) {
+-			LOG_ERR("Failed to activate CE line (%d)", rc);
+-			return rc;
++	for (int attempt = 0; attempt <= 2; attempt++) {
++		if (attempt > 0) {
++			/* Between retries only: give VPR time to finish post-abort cleanup.
++			 * Not needed on the first attempt — the IRQ-path __ASB() already
++			 * guarantees VPR is idle before k_sem_give() is called.
++			 */
++			k_busy_wait(200);
++			/* Drain any stale completion give from the previous aborted attempt. */
++			(void)k_sem_take(&dev_data->finished, K_NO_WAIT);
+ 		}
+-	}
  
- 	err = nrf_sqspi_xfer(&dev_config->sqspi, sqspi_xfer, 1, 0);
- 	if (err != NRFX_SUCCESS) {
-+		/* Deassert CE */
+-	err = nrf_sqspi_xfer(&dev_config->sqspi, sqspi_xfer, 1, 0);
+-	if (err != NRFX_SUCCESS) {
+-		LOG_ERR("nrf_sqspi_xfer() failed: %08x", err);
+-		return -EIO;
+-	}
 +		if (dev_data->dev_id->ce.port) {
-+			gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
++			rc = gpio_pin_set_dt(&dev_data->dev_id->ce, 1);
++			if (rc < 0) {
++				LOG_ERR("Failed to activate CE line (%d)", rc);
++				return rc;
++			}
 +		}
-+		if (retries > 0) {
-+			nrf_sqspi_abort(&dev_config->sqspi);
-+			retries--;
-+			goto retry;
-+		}
- 		LOG_ERR("nrf_sqspi_xfer() failed: %08x", err);
- 		return -EIO;
- 	}
  
- 	rc = k_sem_take(&dev_data->finished, timeout);
- 	if (rc < 0) {
+-	rc = k_sem_take(&dev_data->finished, timeout);
+-	if (rc < 0) {
 -		rc = -ETIMEDOUT;
-+		/* Deassert CE */
+-	}
++		err = nrf_sqspi_xfer(&dev_config->sqspi, sqspi_xfer, 1, 0);
++		if (err != NRFX_SUCCESS) {
++			if (dev_data->dev_id->ce.port) {
++				gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
++			}
++			if (attempt < 2) {
++				nrf_sqspi_abort(&dev_config->sqspi);
++				continue;
++			}
++			LOG_ERR("nrf_sqspi_xfer() failed: %08x", err);
++			return -EIO;
++		}
++
++		rc = k_sem_take(&dev_data->finished, timeout);
++		if (rc < 0) {
++			if (dev_data->dev_id->ce.port) {
++				gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
++			}
++			nrf_sqspi_abort(&dev_config->sqspi);
++			if (attempt < 2) {
++				continue;
++			}
++			LOG_ERR("xfer timeout: cmd=0x%x len=%u", sqspi_xfer->cmd,
++				(uint32_t)sqspi_xfer->data_length);
++			return -ETIMEDOUT;
++		}
+ 
+-	if (dev_data->dev_id->ce.port) {
+-		int rc2;
++		/* Transfer succeeded — deassert CE and return. */
 +		if (dev_data->dev_id->ce.port) {
-+			gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
-+		}
-+		nrf_sqspi_abort(&dev_config->sqspi);
-+		if (retries > 0) {
-+			retries--;
-+			goto retry;
-+		}
-+		LOG_ERR("xfer timeout: cmd=0x%x len=%u", sqspi_xfer->cmd,
-+			(uint32_t)sqspi_xfer->data_length);
-+		return -ETIMEDOUT;
++			int rc2 = gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
+ 
+-		/* Do not use `rc` to not overwrite potential timeout error. */
+-		rc2 = gpio_pin_set_dt(&dev_data->dev_id->ce, 0);
+-		if (rc2 < 0) {
+-			LOG_ERR("Failed to deactivate CE line (%d)", rc2);
+-			return rc2;
++			if (rc2 < 0) {
++				LOG_ERR("Failed to deactivate CE line (%d)", rc2);
++				return rc2;
++			}
+ 		}
++		return rc;
  	}
  
- 	if (dev_data->dev_id->ce.port) {
-@@ -279,20 +298,15 @@ static int perform_xfer(const struct device *dev,
- 	return rc;
+-	return rc;
++	/* Unreachable, but satisfies the compiler. */
++	return -EIO;
  }
  
 -static int process_packet(const struct device *dev,
@@ -166,7 +205,7 @@ index c93313d1c6..47c9ad26d2 100644
  	};
  	int rc;
  
-@@ -300,24 +314,19 @@ static int process_packet(const struct device *dev,
+@@ -300,24 +318,19 @@ static int process_packet(const struct device *dev,
  		if (packet->dir == MSPI_TX) {
  			sqspi_xfer.dir = NRF_SQSPI_XFER_DIR_TX;
  			sqspi_xfer.dummy_length = xfer->tx_dummy;
@@ -196,7 +235,7 @@ index c93313d1c6..47c9ad26d2 100644
  		/* Nothing to be transferred, skip this packet. */
  		return 0;
  	}
-@@ -331,21 +340,17 @@ static int process_packet(const struct device *dev,
+@@ -331,21 +344,17 @@ static int process_packet(const struct device *dev,
  		 * and that call has succeeded, we know the region is valid.
  		 */
  		if (packet->dir == MSPI_TX) {
@@ -222,7 +261,7 @@ index c93313d1c6..47c9ad26d2 100644
  {
  	const struct mspi_sqspi_config *dev_config = dev->config;
  	struct mspi_sqspi_data *dev_data = dev->data;
-@@ -354,8 +359,8 @@ static int _api_transceive(const struct device *dev,
+@@ -354,8 +363,8 @@ static int _api_transceive(const struct device *dev,
  	nrfx_err_t err;
  	int rc;
  
@@ -233,7 +272,7 @@ index c93313d1c6..47c9ad26d2 100644
  	if (err != NRFX_SUCCESS) {
  		LOG_ERR("nrf_sqspi_dev_cfg() failed: %08x", err);
  		return -EIO;
-@@ -371,8 +376,7 @@ static int _api_transceive(const struct device *dev,
+@@ -371,8 +380,7 @@ static int _api_transceive(const struct device *dev,
  	return 0;
  }
  
@@ -243,7 +282,7 @@ index c93313d1c6..47c9ad26d2 100644
  			  const struct mspi_xfer *req)
  {
  	struct mspi_sqspi_data *dev_data = dev->data;
-@@ -414,16 +418,14 @@ static int api_transceive(const struct device *dev,
+@@ -414,16 +422,14 @@ static int api_transceive(const struct device *dev,
  	return rc;
  }
  
@@ -262,7 +301,7 @@ index c93313d1c6..47c9ad26d2 100644
  		if (rc < 0) {
  			LOG_ERR("Cannot apply default pins state (%d)", rc);
  			return rc;
-@@ -431,8 +433,8 @@ static int dev_pm_action_cb(const struct device *dev,
+@@ -431,8 +437,8 @@ static int dev_pm_action_cb(const struct device *dev,
  
  		nrf_sqspi_activate(&dev_config->sqspi);
  #if defined(CONFIG_SOC_SERIES_NRF54L)
@@ -273,7 +312,7 @@ index c93313d1c6..47c9ad26d2 100644
  #endif
  
  		dev_data->suspended = false;
-@@ -440,10 +442,8 @@ static int dev_pm_action_cb(const struct device *dev,
+@@ -440,10 +446,8 @@ static int dev_pm_action_cb(const struct device *dev,
  		return 0;
  	}
  
@@ -286,7 +325,7 @@ index c93313d1c6..47c9ad26d2 100644
  		if (rc < 0) {
  			LOG_ERR("Cannot apply sleep pins state (%d)", rc);
  			return rc;
-@@ -455,8 +455,8 @@ static int dev_pm_action_cb(const struct device *dev,
+@@ -455,8 +459,8 @@ static int dev_pm_action_cb(const struct device *dev,
  		}
  
  #if defined(CONFIG_SOC_SERIES_NRF54L)
@@ -297,7 +336,7 @@ index c93313d1c6..47c9ad26d2 100644
  #endif
  		nrf_sqspi_deactivate(&dev_config->sqspi);
  
-@@ -498,17 +498,15 @@ static int dev_init(const struct device *dev)
+@@ -498,17 +502,15 @@ static int dev_init(const struct device *dev)
  	dev_data->sqspi_dev_cfg.sample_delay_cyc = 1;
  
  #if defined(CONFIG_SOC_SERIES_NRF54L)
@@ -320,7 +359,7 @@ index c93313d1c6..47c9ad26d2 100644
  
  	err = nrf_sqspi_init(&dev_config->sqspi, &sqspi_cfg);
  	if (err != NRFX_SUCCESS) {
-@@ -523,11 +521,9 @@ static int dev_init(const struct device *dev)
+@@ -523,11 +525,9 @@ static int dev_init(const struct device *dev)
  	}
  
  	for (ce_gpio = dev_config->ce_gpios;
@@ -334,7 +373,7 @@ index c93313d1c6..47c9ad26d2 100644
  			return -ENODEV;
  		}
  
-@@ -549,38 +545,34 @@ static int dev_init(const struct device *dev)
+@@ -549,38 +549,34 @@ static int dev_init(const struct device *dev)
  }
  
  static DEVICE_API(mspi, drv_api) = {
