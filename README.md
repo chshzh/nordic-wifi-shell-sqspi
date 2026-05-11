@@ -167,8 +167,6 @@ Connect to **VCOM1** (UART20, P1.16/P1.17) at **115200 baud** — this is the se
 
 ## Throughput Test Results
 
-> Full test details: [WCS-121](https://nordicsemi.atlassian.net/browse/WCS-121)
-
 **NCS v3.3.0 — BE92U_5G (5 GHz) — UDP — 3 runs — May 2026**
 
 | Device | UDP TX avg (Mbps) | UDP RX avg (Mbps) |
